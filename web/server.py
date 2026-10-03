@@ -10,6 +10,7 @@ from urllib.parse import (
 )
 import json
 import multiprocessing
+import os
 import shutil
 import threading
 import traceback
@@ -45,8 +46,14 @@ PROMPT_SECTION_MARKERS = (
 )
 
 
-HOST = "0.0.0.0"
-PORT = 8000
+HOST = (
+    os.environ.get(
+        "APP_HOST",
+        "0.0.0.0"
+    )
+    .strip()
+    or "0.0.0.0"
+)
 
 PROJECT_ROOT = (
     Path(__file__)
@@ -54,6 +61,96 @@ PROJECT_ROOT = (
     .parent
     .parent
 )
+
+
+def resolve_server_port(
+    default_port=8003
+):
+
+    """
+    The port this project serves on.
+
+    Several copies of this project (and sibling projects in the same
+    workspace) can run at the same time, so the port is never assumed
+    to be free. Resolution order:
+
+        1. APP_PORT - exported by runner.bat, which also needs the port
+           to point the Cloudflare tunnel at this exact server.
+        2. config/server.json -> port.
+        3. The hardcoded default.
+
+    Keeping the lookup in one place means the tunnel, the UI and the
+    Instagram public URL always agree on the same number.
+    """
+
+    candidates = []
+
+    environment_port = (
+        os.environ.get(
+            "APP_PORT",
+            ""
+        )
+        .strip()
+    )
+
+    if environment_port:
+
+        candidates.append(
+            environment_port
+        )
+
+    # Then the project config, resolved against the project root so the
+    # value is found no matter which directory the server is started in.
+
+    try:
+
+        with open(
+            PROJECT_ROOT
+            /
+            "config"
+            /
+            "server.json",
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            server_config = json.load(
+                file
+            )
+
+        candidates.append(
+            str(
+                server_config.get(
+                    "port",
+                    ""
+                )
+            )
+        )
+
+    except (OSError, ValueError, AttributeError):
+
+        pass
+
+    for candidate in candidates:
+
+        try:
+
+            port = int(
+                candidate
+            )
+
+        except (TypeError, ValueError):
+
+            continue
+
+        if 1 <= port <= 65535:
+
+            return port
+
+    return default_port
+
+
+PORT = resolve_server_port()
 
 MEDIA_ROOT = (
     PROJECT_ROOT
@@ -1813,9 +1910,46 @@ def run_job(
     return True
 
 
+class ExclusiveThreadingHTTPServer(
+    ThreadingHTTPServer
+):
+
+    """
+    A ThreadingHTTPServer that refuses to share its port.
+
+    ThreadingHTTPServer inherits allow_reuse_address = 1 from
+    TCPServer, which on Windows maps to SO_REUSEADDR. That does not
+    merely allow a quick restart after TIME_WAIT - it lets a second
+    process bind a port that is already being served, so two servers
+    silently end up sharing one port and requests are split between
+    them at random. Since several projects now run at the same time,
+    a busy port has to be reported as an error instead.
+
+    SO_REUSEADDR is not needed here: the server is long-lived and
+    listen sockets do not linger in TIME_WAIT the way accepted
+    connections do.
+    """
+
+    allow_reuse_address = False
+
+
 class RequestHandler(
     BaseHTTPRequestHandler
 ):
+
+    # HTTP/1.1 enables keep-alive, so the status poll the UI runs
+    # periodically reuses one connection instead of opening a fresh TCP
+    # connection per request. Under the HTTP/1.0 default every single
+    # response tore its connection down, which parked a socket in
+    # TIME_WAIT each time; with several projects polling at once plus
+    # active downloads that churn exhausts socket resources and
+    # produces WinError 10055 ("insufficient buffer space or queue was
+    # full").
+    #
+    # Keep-alive requires every response to declare its length, so any
+    # new response path MUST send Content-Length (see the 416 branch
+    # in serve_media, which has to send an explicit zero length).
+    protocol_version = "HTTP/1.1"
 
     def log_message(
         self,
@@ -3114,6 +3248,14 @@ class RequestHandler(
                     f"bytes */{file_size}"
                 )
 
+                # A keep-alive connection cannot be reused unless the
+                # response declares its length, and this body is empty.
+
+                self.send_header(
+                    "Content-Length",
+                    "0"
+                )
+
                 self.end_headers()
 
                 return
@@ -3277,13 +3419,40 @@ def main():
         exist_ok=True
     )
 
-    server = ThreadingHTTPServer(
-        (
-            HOST,
-            PORT
-        ),
-        RequestHandler
+    print(
+        "[SYSTEM] Serving on "
+        f"http://{'localhost' if HOST == '0.0.0.0' else HOST}:{PORT}"
     )
+
+    try:
+
+        server = ExclusiveThreadingHTTPServer(
+            (
+                HOST,
+                PORT
+            ),
+            RequestHandler
+        )
+
+    except OSError as error:
+
+        # A busy port is the expected failure when several projects run
+        # side by side, so name the port and the config key that changes
+        # it instead of dumping a raw traceback.
+
+        print(
+            f"[SYSTEM] ERROR: cannot bind port {PORT} ({error})."
+        )
+
+        print(
+            "[SYSTEM] Another project or process is already using it. "
+            "Set a different 'port' in config/server.json "
+            "(or export APP_PORT) and try again."
+        )
+
+        raise SystemExit(
+            1
+        )
 
     try:
 

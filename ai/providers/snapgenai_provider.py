@@ -417,6 +417,33 @@ class SnapGenAiProvider:
         self
     ):
 
+        # runner.bat exports SNAPGENAI_DEBUG_HOST/SNAPGENAI_DEBUG_PORT so
+        # each project drives its own browser. That matters when several
+        # projects run at once: Selenium attaches to a single browser
+        # instance, and the download behaviour the provider applies is a
+        # browser-wide DevTools setting, so two jobs sharing a browser
+        # would redirect each other's downloads mid-run. The environment
+        # wins over config for the same reason.
+        host = str(
+            os.getenv(
+                "SNAPGENAI_DEBUG_HOST",
+                ""
+            )
+            or ""
+        ).strip()
+
+        port = str(
+            os.getenv(
+                "SNAPGENAI_DEBUG_PORT",
+                ""
+            )
+            or ""
+        ).strip()
+
+        if port:
+
+            return f"{host or '127.0.0.1'}:{port}"
+
         address = str(
             self._setting(
                 "debugging_address",
