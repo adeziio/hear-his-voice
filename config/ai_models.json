@@ -1,0 +1,115 @@
+{
+    "execution": {
+        "mode": "local",
+        "device": "auto",
+        "fallback": "cpu"
+    },
+    "models": {
+        "language_model": {
+            "enabled": true,
+            "provider": "ollama",
+            "model": "qwen3:8b",
+            "thinking": false,
+            "timeout": 900,
+            "options": {
+                "temperature": 1.15,
+                "top_p": 0.95,
+                "top_k": 80,
+                "repeat_penalty": 1.18,
+                "min_p": 0.05
+            }
+        },
+        "video_model": {
+            "enabled": true,
+            "provider": "snapgenai",
+            "ltx": {
+                "base_url": "https://api.ltx.io",
+                "submit_path": "/v2/text-to-video",
+                "status_path": "/v2/text-to-video/{job_id}",
+                "prompt_field": "prompt",
+                "send_duration_and_resolution": true,
+                "model": "ltx-2-3-fast",
+                "extra_params": {},
+                "auth_header": "Authorization",
+                "auth_scheme": "Bearer",
+                "accept_header": "",
+                "api_key_env": "LTX_API_KEY",
+                "status_field": "status",
+                "poll_interval_seconds": 5,
+                "timeout_seconds": 900,
+                "request_timeout_seconds": 30
+            },
+            "snapgenai": {
+                "base_url": "https://snapgen.ai/",
+                "headless": false,
+                "attach_to_existing_chrome": true,
+                "debugging_address": "127.0.0.1:9222",
+                "pause_min_seconds": 5,
+                "pause_max_seconds": 10,
+                "refresh_interval_seconds": 30,
+                "aspect_ratio_target": "9:16",
+                "aspect_ratio_button_selector": "",
+                "aspect_ratio_option_selector": "",
+                "aspect_ratio_timeout_seconds": 15,
+                "profile_directory": "media/browser_profile/snapgenai",
+                "download_directory": "media/downloads/snapgenai",
+                "page_timeout_seconds": 60,
+                "submit_timeout_seconds": 30,
+                "login_popup_wait_seconds": 15,
+                "login_form_probe_seconds": 5,
+                "login_timeout_seconds": 120,
+                "generation_timeout_seconds": 1800,
+                "download_timeout_seconds": 300,
+                "poll_interval_seconds": 3,
+                "download_poll_interval_seconds": 2,
+                "prompt_selector": "",
+                "submit_selector": "",
+                "download_selector": "",
+                "failure_selector": "",
+                "login_email_selector": "",
+                "login_password_selector": "",
+                "login_submit_selector": "",
+                "watermark_remover": {
+                    "executable": "tools/GeminiWatermarkTool-Video.exe",
+                    "output_flag": "",
+                    "extra_args": [],
+                    "timeout_seconds": 3600
+                }
+            },
+            "local": {
+                "model": "diffusers/LTX-2.3-Diffusers",
+                "device_allocation": {
+                    "mode": "model",
+                    "vae_tiling": true,
+                    "vae_slicing": true,
+                    "attention_slicing": false
+                },
+                "generation_resolution": {
+                    "width": 768,
+                    "height": 1344
+                },
+                "generation_fps": 24,
+                "steps": {
+                    "cpu": 8,
+                    "cuda": 30
+                },
+                "stg_blocks": {
+                    "indices": [
+                        28
+                    ]
+                },
+                "guidance_scale": 3.0,
+                "audio_guidance_scale": 7.0,
+                "stg_scale": 1.0,
+                "audio_stg_scale": 1.0,
+                "modality_scale": 3.0,
+                "audio_modality_scale": 3.0,
+                "audio": {
+                    "enabled": true,
+                    "music_enabled": true
+                },
+                "negative_prompt": "shaky, glitchy, low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, static, blurry, text, subtitles, watermark, cartoon, anime, illustration, painting, digital art, 3d render, video game graphics"
+            }
+        }
+    }
+}

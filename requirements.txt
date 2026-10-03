@@ -1,0 +1,75 @@
+# ==================================
+# Core Application
+# ==================================
+
+python-dotenv
+requests
+
+
+# ==================================
+# Local AI - Language Generation
+# ==================================
+
+# Ollama communication
+requests
+
+
+# ==================================
+# Local AI - Video + Audio Generation
+# ==================================
+
+# Diffusers model pipelines
+diffusers
+transformers
+
+# Model loading and optimization
+accelerate
+safetensors
+huggingface_hub
+peft
+
+# Model / pipeline dependencies
+sentencepiece
+protobuf
+einops
+ftfy
+
+
+# ==================================
+# Browser Automation (SnapGenAI provider)
+# ==================================
+
+# Chrome automation for the SnapGenAI browser workflow
+selenium
+
+
+# ==================================
+# Video + Audio Processing
+# ==================================
+
+# Video/audio encoding and playback
+moviepy
+imageio
+imageio-ffmpeg
+av
+
+# Audio processing
+pydub
+
+
+# ==================================
+# Image + Numerical Processing
+# ==================================
+
+Pillow
+opencv-python
+numpy
+
+
+# ==================================
+# Development / Testing
+# ==================================
+
+pytest
+black
+flake8
