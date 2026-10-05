@@ -31,7 +31,7 @@ from instagram import (
 )
 
 from core.publishing import (
-    scripture_credit_lines
+    build_caption
 )
 
 
@@ -2281,40 +2281,14 @@ class RequestHandler(
                 or []
             )
 
-            stored_caption = str(
-                prompt_item.get(
-                    "caption",
-                    ""
-                )
-            ).strip()
-
-            if stored_caption:
-
-                # Hear His Voice episodes carry the exact Scripture
-                # caption; post it untouched, without hashtags.
-
-                caption_parts = [
-                    stored_caption
-                ]
-
-            else:
-
-                # The Scripture credit sits with the closing lines,
-                # after the summary and immediately before the hashtags.
-                caption_parts = (
-                    [
-                        part
-                        for part in (
-                            title,
-                            summary,
-                        )
-                        if part.strip()
-                    ]
-                    + scripture_credit_lines(
-                        prompt_item.get("reference")
-                    )
-                    + [" ".join(tags)]
-                )
+            # title -> summary -> attribution -> hashtags, assembled by
+            # the shared helper so the caption cannot drift from the
+            # description.
+            caption_parts = build_caption(
+                title,
+                summary,
+                tags,
+            )
 
             self.send_json(
                 {
@@ -2342,9 +2316,7 @@ class RequestHandler(
                         ),
                         "title": title
                     },
-                    "caption": "\n\n".join(
-                        caption_parts
-                    )
+                    "caption": caption_parts
                 }
             )
 

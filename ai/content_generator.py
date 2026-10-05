@@ -78,11 +78,18 @@ class ContentGenerationError(
 DIRECTION_SCHEMA = {
     "type": "object",
     "properties": {
+        # maxLength is not decoration. It is a grammar-level brake on
+        # the two failure modes this channel actually hit: a poetic
+        # title ("Genealogy of Light") and an interpretive summary
+        # ("revealing a divine ancestry rooted in faith and promise"
+        # for a passage that says no such thing).
         "title": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 90
         },
         "summary": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 180
         },
         "mood": {
             "type": "string"
@@ -354,11 +361,39 @@ class ContentGenerator(
             "- \"visual_direction\": one sentence describing the shot "
             "the viewer should see, in the channel's reverent "
             "cinematic style.\n"
-            "Also return:\n"
-            "- \"title\": a short, reverent, properly punctuated "
-            "episode title.\n"
-            "- \"summary\": one complete sentence describing the "
-            "passage for the episode listing.\n"
+            + "\n\nTITLE RULES\n"
+        "The title must be clear, factual, and about what this "
+        "passage actually says or does. Write it in plain words.\n"
+        "- Name the event, teaching, saying, or story the passage "
+        "contains, using the passage's own language.\n"
+        "- NEVER invent a poetic, symbolic, or literary concept and "
+        "attach it to the passage. No metaphors, no invented 'of ...' "
+        "pairings, no made-up themes.\n"
+        "- NEVER add a theological claim the passage does not state. "
+        "Do not assert meaning, promise, or doctrine that is not in "
+        "the quoted text.\n"
+        "- Keep it short: a few words, not a sentence.\n"
+        "- Do NOT include the Scripture reference. It is added to the "
+        "title automatically; do not repeat it yourself.\n"
+        "Example - the passage below opens Matthew's genealogy of "
+        "Jesus. A correct title is \"The Genealogy of Jesus Christ\". "
+        "A WRONG title is \"Genealogy of Light\", which invents a "
+        "symbol the passage never mentions.\n"
+        + "\n\nSUMMARY RULES\n"
+        "The summary is one short sentence for the episode listing.\n"
+        "- State plainly what happens or is said in the passage.\n"
+        "- Do NOT repeat or restate the title, and do not reuse the "
+        "title's distinctive wording.\n"
+        "- Do NOT include the Scripture reference. It is already in "
+        "the title.\n"
+        "- Do NOT interpret, and do not add any claim the passage does "
+        "not state. Report the content; do not explain its theology.\n"
+        "- Keep it short and useful: one sentence, under 25 words.\n"
+        "\nAlso return:\n"
+            "- \"title\": a short, clear, factual title, following the "
+            "TITLE RULES above. No Scripture reference.\n"
+            "- \"summary\": one short factual sentence, following the "
+            "SUMMARY RULES above. No reference, no interpretation.\n"
             "- \"mood\": 1-3 lowercase English words for the emotional "
             "tone, used to choose the background music (for example "
             "reverent, hopeful, solemn, gentle, uplifting, tender).\n"
@@ -488,15 +523,35 @@ class ContentGenerator(
 
         reference = scripture["reference"]
 
+        # The model is told not to include the reference, but a model
+        # can still append one. Strip it so the reference is added
+        # exactly once, by the code below, in one consistent format.
+        title = _strip_reference(
+            title,
+            reference,
+        )
+
         if not title:
 
-            title = reference
+            # Nothing usable came back. The passage's own opening words
+            # are factual and on-topic, so use them rather than
+            # inventing something.
+            title = _strip_reference(
+                _first_sentence(scripture["text"]),
+                reference,
+            ) or reference
 
         # The reference belongs in the title, so the episode is
         # identifiable from the listing without a separate field.
-        if reference not in title:
-
-            title = f"{title} ({reference})"
+        #
+        # The separator is an em dash, and the reference is never
+        # wrapped in parentheses: "Title — Book Chapter:Verse" is the
+        # format this channel publishes with. A title carries no full
+        # stop, because the reference supplies the ending.
+        title = "{} — {}".format(
+            title.rstrip(" ."),
+            reference,
+        )
 
         summary = str(
             direction.get(
@@ -505,13 +560,31 @@ class ContentGenerator(
             )
         ).strip()
 
-        if not summary:
+        # The reference already appears in the title, so a summary that
+        # repeats it is redundant. Strip any that leaked in.
+        summary = _strip_reference(
+            summary,
+            reference,
+        )
 
-            summary = f"{reference}."
+        if not summary or _restates_title(
+            summary,
+            title,
+            reference,
+        ):
 
+            # Fall back to the passage's own opening sentence: factual,
+            # short, and impossible to invent theology with.
+            summary = _first_sentence(
+                scripture["text"]
+            )
+
+        # No "reference" field. The reference is already in the title,
+        # and neither the description nor the caption repeats it, so a
+        # second copy on disk would be redundancy with no reader. The
+        # other channels publish without one.
         return {
             "title": title,
-            "reference": reference,
             "summary": summary,
             "narration": scripture["text"],
             "mood": self._normalize_mood(
@@ -607,6 +680,140 @@ class ContentGenerator(
         )
 
 
+def _first_sentence(text):
+    """
+    The opening sentence of a passage, trimmed to something short enough
+    to stand as a title or a summary on its own.
+
+    Used only as a fallback when the model returns nothing usable, so
+    the fallback is taken verbatim from the WEBC text rather than
+    invented.
+    """
+
+    cleaned = str(
+        text or ""
+    ).strip()
+
+    if not cleaned:
+
+        return ""
+
+    for mark in (". ", "? ", "! "):
+
+        head, _sep, _tail = cleaned.partition(mark)
+
+        if head.strip():
+
+            return head.strip() + mark.strip()
+
+    return cleaned
+
+
+def _strip_reference(text, reference):
+    """
+    Removes a Scripture reference from a piece of text, wherever the
+    model chose to put it.
+
+    The reference is added to the title by the code, in one place and one
+    format. Anything the model supplied is duplication, so it is removed
+    to keep the title from reading "Foo (Matthew 1:1) (Matthew 1:1-9)".
+
+    Only the punctuation disturbed by the removal is tidied. Sentence
+    punctuation belonging to the text is left alone - a summary must
+    keep its full stop.
+    """
+
+    value = str(
+        text or ""
+    ).strip()
+
+    if not value or not reference:
+
+        return value
+
+    # A bracketed or trailing form, e.g. "Foo (Matthew 1:1-9)".
+    for opening, closing in (("(", ")"), ("[", "]")):
+
+        value = value.replace(
+            f"{opening}{reference}{closing}",
+            "",
+        )
+
+    # A bare occurrence, e.g. "Matthew 1:1-9 - Foo", or
+    # "Matthew 1:1-9 lists ...".
+    value = value.replace(
+        reference,
+        "",
+    )
+
+    # Tidy only what the removal disturbed.
+    value = re.sub(r"\s{2,}", " ", value)
+    value = re.sub(r"^[\s\-–—,;:]+", "", value)
+    value = re.sub(r"[\s\-–—,:]+$", "", value)
+    value = value.strip()
+
+    # Removing the reference can leave a clause that starts mid-sentence
+    # ("lists the ancestors of Jesus"). Restore the capital.
+    if value[:1].islower():
+
+        value = value[0].upper() + value[1:]
+
+    return value
+
+
+def _restates_title(summary, title, reference):
+    """
+    True when the summary is really just the title again.
+
+    The prompt asks for a summary that adds something the title does not
+    say, but a model asked twice will sometimes echo it back verbatim.
+    That is worth catching here: shipping a listing where the title and
+    the description say the same thing wastes the space.
+
+    The test is deliberately narrow - high word overlap - because the
+    opposite mistake is worse. A summary that legitimately shares the
+    title's vocabulary and then adds detail ("The genealogy of Jesus
+    Christ lists the ancestors from Abraham down to David") must be
+    kept. Only an almost-verbatim echo counts.
+
+    It cannot catch a paraphrase that swaps the words around ("lineage"
+    for "genealogy"); that is left to the prompt.
+    """
+
+    def content_words(value):
+
+        return {
+            word
+            for word in re.findall(
+                r"[a-z0-9]+",
+                str(value or "").lower(),
+            )
+            if len(word) > 3
+        }
+
+    summary_words = content_words(summary)
+
+    if not summary_words:
+
+        return True
+
+    title_words = content_words(
+        _strip_reference(
+            title,
+            reference,
+        )
+    )
+
+    if not title_words:
+
+        return False
+
+    shared = summary_words & title_words
+    every = summary_words | title_words
+
+    return (len(shared) / len(every)) >= 0.8
+
+
 def write_content_files(
     episode_directory,
     content
@@ -638,15 +845,16 @@ def write_content_files(
 
     divider = "=" * 72
 
-# IMPORTANT: TITLE, REFERENCE, PROMPT, and SUMMARY must all be in
-    # the same section between the dividers, because the web UI parses
-    # this file by splitting on the divider and looking for those
-    # markers. REFERENCE carries the passage that was read, and is reused
-    # verbatim by the YouTube and Instagram descriptions.
+    # TITLE, PROMPT, and SUMMARY must all be in the same section
+    # between the dividers, because the web UI parses this file by
+    # splitting on the divider and looking for those markers.
+    #
+    # There is deliberately no REFERENCE line. The reference already
+    # sits in the TITLE line, and neither published caption repeats it,
+    # so a third copy here would only be able to drift out of step.
     lines = [
         divider,
         f"TITLE: {content['title']}",
-        f"REFERENCE: {content.get('reference', '')}",
         f"PROMPT: {content['narration']}",
         f"SUMMARY: {content['summary']}",
         divider,

@@ -35,8 +35,7 @@ from ai.content_generator import (
 
 
 CONTENT = {
-    "title": "The Light of Love (John 3:16-17)",
-    "reference": "John 3:16-17",
+    "title": "The Light of Love — John 3:16-17",
     "summary": "A reflection on divine love.",
     "narration": (
         "For God so loved the world, that he gave his only born Son."
@@ -61,11 +60,10 @@ def test_content_json_has_only_the_expected_keys(episode_directory):
     content.json must carry exactly the keys the pipeline and UI rely
     on - no copy of the Scripture text itself.
 
-    The passage REFERENCE is stored deliberately. The YouTube and
-    Instagram descriptions name the passage that was read, and they are
-    built from this record, so without it the credit block would have to
-    be scraped back out of the title. It is written once here and reused,
-    never re-typed.
+    The passage reference is not stored. It lives in the
+    title, and neither the YouTube description nor the Instagram caption
+    repeats it, so a separate field would have no reader. The other
+    channels publish without one.
     """
     write_content_files(
         episode_directory,
@@ -83,11 +81,13 @@ def test_content_json_has_only_the_expected_keys(episode_directory):
     ) == [
         "mood",
         "narration",
-        "reference",
         "summary",
         "title",
         "visuals",
     ]
+
+    # No reference field, under any name.
+    assert "reference" not in reloaded
 
 
 def test_visual_entries_match_the_expected_shape(
@@ -170,11 +170,9 @@ def test_prompt_txt_uses_the_expected_markers(
     assert "PROMPT: " in body
     assert "SUMMARY: " in body
 
-    # The passage that was read is written out too, and is reused
-    # verbatim by the YouTube and Instagram descriptions.
-    assert (
-        f"REFERENCE: {CONTENT['reference']}"
-    ) in body
+    # No REFERENCE line. The reference is already in TITLE, and a third
+    # copy would only be able to drift out of step with it.
+    assert "REFERENCE: " not in body
 
     # Nothing that would break the section-based parser.
     assert "TRANSLATION:" not in body

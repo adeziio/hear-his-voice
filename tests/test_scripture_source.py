@@ -283,7 +283,7 @@ def test_the_ai_cannot_change_the_scripture(
     # Scripture reference carried in the title.
     assert (
         content["title"]
-        == "A Perfectly Reasonable Title (John 3:16-17)"
+        == "A Perfectly Reasonable Title — John 3:16-17"
     )
 
     assert len(

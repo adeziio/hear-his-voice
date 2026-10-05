@@ -63,11 +63,9 @@ def generate_metadata_from_prompt(
         ).strip()
 
     # The exact WEBC wording that was spoken, straight from the
-    # episode content. It is never re-typed or reworded here.
-    scripture_text = str(
-        prompt_item.get("narration") or ""
-    ).strip()
-
+    # episode content. It is never re-typed or reworded here, and it is
+    # deliberately NOT published: the whole passage is already in the
+    # video, so repeating it is noise in the search results.
     summary = str(
         prompt_item.get("summary") or ""
     ).strip()
@@ -76,17 +74,17 @@ def generate_metadata_from_prompt(
         defaults.get("tags") or DEFAULT_TAGS
     )
 
-    # The passage that was read, plus the WEBC credit. Taken from the
-    # episode's stored reference rather than re-typed, so it always
-    # matches the narration.
-    reference = str(
-        prompt_item.get("reference") or ""
-    ).strip()
+    # The WEBC attribution. This is the channel's extra description line,
+    # so it sits in the same slot every channel uses, between the summary
+    # and the hashtags.
+    credit = scripture_credit_lines()
 
-    credit = scripture_credit_lines(
-        reference
-    )
-
+    # title -> summary -> extra lines -> hashtags
+    #
+    # The title leads the description, which is what every channel here
+    # does. It carries the passage reference, and that is deliberate: the
+    # reference appears once in the title itself, and the leading line is
+    # that same title rather than a separate restatement of the reference.
     lines = []
 
     if base_title:
@@ -97,18 +95,12 @@ def generate_metadata_from_prompt(
 
         lines.append(summary)
 
-    if scripture_text:
-
-        lines.append(scripture_text)
-
     lines.extend(
         list(
             defaults.get("description_extra_lines") or []
         )
     )
 
-    # The Scripture credit sits with the closing lines, after the summary
-    # and immediately before the hashtags.
     lines.extend(credit)
 
     lines.append(" ".join(tags))
