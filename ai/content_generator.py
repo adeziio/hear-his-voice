@@ -347,6 +347,10 @@ class ContentGenerator(
             + " SPOKEN SEGMENTS\n"
             + segment_lines
             + "\n\nVISUAL SEARCH QUERY RULES\n"
+            "Each search_query is a Pexels search phrase. The viewer "
+            "hears this segment's words while watching the footage it "
+            "returns, so every query must support the meaning of its "
+            "own segment.\n"
             + visual_rules
             + "\n\nVISUAL DIRECTION\n"
             + creative_directions
@@ -356,8 +360,12 @@ class ContentGenerator(
             + " objects in \"visuals\", one per segment, in the same "
             "order as the segments above. Each object has exactly two "
             "fields:\n"
-            "- \"search_query\": a short, practical Pexels stock "
-            "footage search phrase (2-5 words) for that segment.\n"
+            "- \"search_query\": a Pexels stock footage search phrase "
+            "(2-5 words) chosen because it SUPPORTS THE MEANING of that "
+            "segment - its theme, setting, era or mood. It must be a "
+            "phrase that genuinely returns usable reverent stock "
+            "footage, and it must never be a literal attempt to film a "
+            "biblical person, a family relationship, or an event.\n"
             "- \"visual_direction\": one sentence describing the shot "
             "the viewer should see, in the channel's reverent "
             "cinematic style.\n"

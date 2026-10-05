@@ -84,16 +84,19 @@
         "words_per_second": 2.9,
         "scripture_scope_note": "Episodes come only from Matthew, Mark, Luke, and John. That limit is enforced in code, not by the shape of any list. The scripture block below holds the WEBC source and the guidance examples; the passages themselves are drawn from the entire Gospel text at runtime.",
         "visual_rules": [
-            "Generate one practical Pexels stock-footage search query per spoken segment. The viewer will hear the Scripture while seeing this footage, so the query must support the meaning of that specific segment without pretending to be the event itself.",
-            "Keep every query short, generally 2-5 words, using concrete nouns a human editor would actually type into Pexels.",
-            "Prefer scenes that exist as real stock footage: landscapes, light and weather, hands and craft, roads and journeys, water, fire, bread, hands raised in prayer, people listening, a lamp burning, an open book, fields at harvest.",
-            "Do NOT search for the literal miracle or person. There is no stock footage of Jesus, and queries like 'Jesus healing' or 'biblical drama' return unusable results. Search for the FEELING or SYMBOL the passage carries: 'light breaking through clouds', 'still water at dawn', 'a single candle in darkness', 'hands opening a letter'.",
-            "Do not invent specific named people, faces of actors playing biblical figures, or shots that could only exist as CGI. The footage must look like beautiful, reverent real-world cinematography.",
-            "Test each query mentally: if I typed this into Pexels, would several genuinely usable vertical clips come back? If not, choose a more practical phrase.",
+            "Generate exactly one Pexels search query per spoken segment. The viewer hears the Scripture while watching this footage, so every query must be chosen for THAT segment and must visibly earn its place next to the words being spoken.",
+            "Base each query on the MEANING, THEME, SETTING, MOOD or IMAGERY of its segment. Decide what this passage is actually about, then search for footage that carries that sense - not for a prop that merely happens to appear somewhere in the sentence.",
+            "Prefer cinematic, reverent, historically appropriate or atmospheric footage: ancient stone, desert and hill country, old parchment and handwriting, olive and vine, lamplight, weathered wood and linen, long roads, quiet water, open sky, fields at golden hour, archival textures.",
+            "Keep every query short, generally 2-5 words, using concrete nouns a human editor would actually type into Pexels. Lead with the most specific and most searchable word.",
+            "Use concepts that genuinely exist on Pexels. A query must be the kind of phrase an editor types to find usable vertical stock - 'ancient parchment writing', 'Middle Eastern desert landscape', 'ancient Jerusalem' - not a poetic invention.",
+            "Do NOT try to literally depict specific biblical people, genealogical relationships, named events or miracles. Pexels has no footage of Jesus, of a genealogy, of a crucifixion or of any named figure. Queries like 'Jesus healing', 'biblical drama' or 'ancestor portrait' return nothing usable.",
+            "When literal footage does not exist, choose a thematic or symbolic visual instead: the setting, the era, the material world of the time, the emotional register, or the natural element the passage turns on.",
+            "Never choose generic or arbitrary stock with no meaningful connection to the passage. A prop chosen at random is worse than no prop at all: 'wooden table with bread', 'hands raising a cup' and 'still water at dawn' are all real footage and all meaningless filler. Ask of every query: does this image support what is being said?",
+            "Worked example - the passage below is Matthew's genealogy. Prefer 'ancient genealogy scroll', 'ancient parchment writing', 'Middle Eastern desert landscape', 'ancient Jerusalem', 'ancient royal city', 'family lineage historical'. Do NOT reach for 'wooden table with bread', 'hands raising a cup' or 'still water at dawn'.",
             "Avoid graphic, violent, frightening, or distressing imagery. Nothing should be horror, gore, wreckage, or disaster. The register is calm, dignified, and hopeful.",
             "Avoid anything that would look wrong next to the Word of God: neon club lighting, arcade machines, fast cars, smartphones, modern corporate offices, meme-style reactions, text overlays, or watermarks.",
             "Vary the queries across the episode so no two consecutive segments look alike. Avoid repeating the same noun more than twice.",
-            "When in doubt, choose the quieter, more timeless image. Light, sky, water, stone, wood, linen, bread, and hands are always safe."
+            "Before returning each query, test it: if I typed this into Pexels, would several genuinely usable reverent clips come back, and would they support this specific verse? If either answer is no, choose a more meaningful and more practical phrase."
         ],
         "creative_directions": [
             "You are directing the visuals for Scripture that is being read word for word. Your job is to make the viewer feel the passage, not to explain it.",

@@ -182,47 +182,84 @@ class HearHisVoicePipeline:
             f"{next_number:03d}"
         )
 
+    @staticmethod
     def resolve_episode_directory(
-        self,
         episode_id
     ):
         """
-        Resolves an episode id to its directory. Ids are the directory
-        names under media/output/shorts, so "1" and "001" both work.
+        Accepts an episode id like "media/output/shorts/3" or
+        just "3" and returns the episode directory.
         """
-        if episode_id is None:
-
-            raise ValueError(
-                "An episode id is required."
-            )
-
-        wanted = str(
-            episode_id
+        episode_id = str(
+            episode_id or ""
         ).strip()
 
-        if not wanted.isdigit():
+        if not episode_id:
 
             raise ValueError(
-                f"'{episode_id}' is not a valid episode id."
+                "Episode ID is required."
             )
 
-        name = f"{int(wanted):03d}"
+        if episode_id.isdigit():
 
-        directory = (
-            self.project_root()
-            /
-            OUTPUT_ROOT
-            /
-            name
-        )
-
-        if not directory.is_dir():
-
-            raise FileNotFoundError(
-                f"Episode {name} does not exist."
+            episode_directory = (
+                HearHisVoicePipeline.project_root()
+                /
+                OUTPUT_ROOT
+                /
+                f"{int(episode_id):03d}"
             )
 
-        return directory
+        else:
+
+            cleaned = (
+                episode_id.replace("\\", "/").strip().strip("/")
+            )
+
+            leaf = (
+                cleaned.rsplit("/", 1)[-1].strip()
+            )
+
+            if leaf.isdigit():
+
+                episode_directory = (
+                    HearHisVoicePipeline.project_root()
+                    /
+                    OUTPUT_ROOT
+                    /
+                    f"{int(leaf):03d}"
+                )
+
+            else:
+
+                episode_directory = (
+                    HearHisVoicePipeline.project_root()
+                    /
+                    cleaned
+                )
+
+                allowed_root = (
+                    HearHisVoicePipeline.project_root()
+                    /
+                    OUTPUT_ROOT
+                ).resolve()
+
+                if (
+                    allowed_root
+                    not in episode_directory.resolve().parents
+                ):
+
+                    raise ValueError(
+                        "Invalid episode path."
+                    )
+
+        if not episode_directory.is_dir():
+
+            raise ValueError(
+                "Episode does not exist."
+            )
+
+        return episode_directory
 
     def _generate_content(
         self,
