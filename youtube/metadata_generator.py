@@ -1,5 +1,17 @@
+"""
+Builds the prefill metadata for an episode.
+
+The Scripture is public domain, but the World English Bible name is a
+trademark of eBible.org and the edition is identified as WEBC, so the
+reference and translation are always shown with the text. The passage is
+posted verbatim and is never edited.
+"""
+
 from youtube.config import (
     get_metadata_defaults
+)
+from core.publishing import (
+    scripture_credit_lines
 )
 
 
@@ -17,10 +29,10 @@ def generate_metadata_from_prompt(
 ):
 
     """
-    Builds the prefill metadata for an episode from:
-    - the episode prompt.txt (TITLE: / REFERENCE: / SCRIPTURE: / SUMMARY: / CAPTION:),
-    - the episode number directory,
-    - the config/youtube.json defaults.
+    Builds the prefill metadata for an episode from the episode's
+    content dict (title / reference / translation / narration /
+    summary), the episode number directory, and the config/youtube.json
+    defaults.
 
     The result is only a starting point - every field is editable
     in the upload form before the user submits.
@@ -50,57 +62,56 @@ def generate_metadata_from_prompt(
             f"{title} {title_suffix}"
         ).strip()
 
-    prompt_text = str(
-        prompt_item.get("prompt") or ""
+    # The exact WEBC wording that was spoken, straight from the
+    # episode content. It is never re-typed or reworded here.
+    scripture_text = str(
+        prompt_item.get("narration") or ""
     ).strip()
 
-    # The generated full prompt is too long for a platform
-    # description. Prefer the exact Scripture caption, then the
-    # model-written short summary, and fall back to the raw prompt
-    # only for older episodes.
-
-    caption_text = str(
-        prompt_item.get("caption") or ""
+    summary = str(
+        prompt_item.get("summary") or ""
     ).strip()
-
-    description_text = (
-        caption_text
-        or str(
-            prompt_item.get("summary") or ""
-        ).strip()
-        or prompt_text
-    )
 
     tags = list(
         defaults.get("tags") or DEFAULT_TAGS
     )
 
+    # The passage that was read, plus the WEBC credit. Taken from the
+    # episode's stored reference rather than re-typed, so it always
+    # matches the narration.
+    reference = str(
+        prompt_item.get("reference") or ""
+    ).strip()
+
+    credit = scripture_credit_lines(
+        reference
+    )
+
     lines = []
 
-    if caption_text:
+    if base_title:
 
-        # The caption already contains the Scripture and reference;
-        # it is posted untouched, without a title line or hashtags.
+        lines.append(base_title)
 
-        lines.append(caption_text)
+    if summary:
 
-    else:
+        lines.append(summary)
 
-        if base_title:
+    if scripture_text:
 
-            lines.append(base_title)
+        lines.append(scripture_text)
 
-        if description_text:
-
-            lines.append(description_text)
-
-        lines.extend(
-            list(
-                defaults.get("description_extra_lines") or []
-            )
+    lines.extend(
+        list(
+            defaults.get("description_extra_lines") or []
         )
+    )
 
-        lines.append(" ".join(tags))
+    # The Scripture credit sits with the closing lines, after the summary
+    # and immediately before the hashtags.
+    lines.extend(credit)
+
+    lines.append(" ".join(tags))
 
     description = "\n\n".join(
         line

@@ -1,0 +1,1351 @@
+from pathlib import Path
+
+import numpy as np
+
+import numpy as np
+
+from PIL import (
+    Image,
+    ImageDraw,
+    ImageFont
+)
+
+from moviepy import (
+    VideoFileClip,
+    AudioFileClip,
+    TextClip,
+    ImageClip,
+    CompositeVideoClip,
+    CompositeAudioClip,
+    AudioClip,
+    vfx,
+    afx
+)
+
+
+class CompositionError(
+    RuntimeError
+):
+
+    pass
+
+
+FONT_CANDIDATES = [
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/seguisb.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf"
+]
+
+# Below this per-clip share (seconds), a sentence is not split across
+# multiple clips - a single clip is clearer than sub-second cuts.
+MIN_CLIP_SHARE = 1.0
+
+
+class Composer:
+
+    """
+    Composes the final vertical Short.
+
+    The narration audio is the primary timeline. The downloaded
+    stock footage is cut into segments that follow the narration,
+    captions are burned in, and background music (plus optional
+    SFX placed in the episode's sfx/ folder) is mixed underneath
+    the narration.
+    """
+
+    def __init__(
+        self,
+        config
+    ):
+
+        self.config = config
+
+        app_config = (
+            config.get(
+                "app",
+                {}
+            )
+        )
+
+        self.shorts_config = (
+            app_config.get(
+                "shorts",
+                {}
+            )
+        )
+
+        self.audio_config = (
+            app_config.get(
+                "audio",
+                {}
+            )
+        )
+
+        self.captions_config = (
+            app_config.get(
+                "captions",
+                {}
+            )
+        )
+
+        self.project_root = (
+            Path(
+                __file__
+            )
+            .resolve()
+            .parents[1]
+        )
+
+    def compose(
+        self,
+        episode_directory,
+        narration,
+        cues,
+        footage_groups,
+        visuals=None,
+        segment_count=None,
+        sentence_durations=None,
+    ):
+
+        """
+        Renders episode.mp4 into the episode directory.
+
+        narration      : result dict from production.narration
+        cues           : caption cues from production.captions
+        footage_groups: list of lists of downloaded footage paths, where
+                        footage_groups[N] holds the clips for visual N
+                        (one group per narration sentence). Each group is
+                        cycled through to cover that sentence's duration.
+        visuals        : the visuals list from the content (for segment count
+                        when footage_groups has empty groups).
+        segment_count  : how many visual segments the timeline should be split
+                        into (defaults to len(visuals), then to the total
+                        number of downloaded clips).
+        sentence_durations : optional list of per-sentence durations (seconds)
+                        in sentence order. When provided, each visual segment
+                        matches its sentence's actual spoken duration so the
+                        visuals change in sync with the narration. Long
+                        sentences combine multiple clips; short sentences cut
+                            clips to fit.
+        """
+
+        # Flatten all available clips as a fallback pool.
+        all_clips = [
+            p
+            for group in footage_groups
+            for p in group
+        ]
+        if not all_clips:
+            raise CompositionError(
+                "No stock footage was downloaded, so the "
+                "video cannot be composed."
+            )
+
+        width = int(
+            self.shorts_config.get(
+                "resolution",
+                {}
+            ).get(
+                "width",
+                1080
+            )
+        )
+
+        height = int(
+            self.shorts_config.get(
+                "resolution",
+                {}
+            ).get(
+                "height",
+                1920
+            )
+        )
+
+        fps = int(
+            self.shorts_config.get(
+                "fps",
+                30
+            )
+        )
+
+        narration_duration = float(
+            narration["duration"]
+        )
+
+        # The narration is the primary timeline. The video always
+        # covers the full narration plus a small tail after the
+        # last spoken word, so the ending never feels cut off and
+        # nothing is ever trimmed.
+
+        video_duration = narration_duration + 0.5
+
+        output_path = (
+            Path(
+                episode_directory
+            )
+            /
+            "episode.mp4"
+        )
+
+        self._opened_sources = []
+
+        try:
+
+            frame_clips = (
+                self._build_frame_clips(
+                    footage_groups,
+                    video_duration,
+                    width,
+                    height,
+                    segment_count,
+                    visuals=visuals,
+                    sentence_durations=sentence_durations,
+                )
+            )
+
+            caption_clips = (
+                self._build_caption_clips(
+                    cues,
+                    width,
+                    height
+                )
+            )
+
+            audio = (
+                self._build_audio(
+                    narration,
+                    video_duration,
+                    Path(
+                        episode_directory
+                    )
+                )
+            )
+
+            final = CompositeVideoClip(
+                frame_clips + caption_clips,
+                size=(
+                    width,
+                    height
+                )
+            ).with_duration(
+                video_duration
+            )
+
+            if audio is not None:
+
+                final = final.with_audio(
+                    audio
+                )
+
+            try:
+
+                final.write_videofile(
+                    str(
+                        output_path
+                    ),
+                    fps=fps,
+                    codec="libx264",
+                    audio_codec="aac",
+                    audio_bitrate="192k",
+                    preset="medium",
+                    threads=4,
+                    logger=None
+                )
+
+            except Exception as error:
+
+                raise CompositionError(
+                    f"Video rendering failed: {error}"
+                )
+
+            finally:
+
+                self._close(
+                    final
+                )
+
+                self._close(
+                    audio
+                )
+
+        finally:
+
+            for source in (
+                self._opened_sources
+            ):
+
+                self._close(
+                    source
+                )
+
+        return output_path
+
+    def _close(
+        self,
+        clip
+    ):
+
+        try:
+
+            clip.close()
+
+        except Exception:
+
+            pass
+    def _build_frame_clips(
+        self,
+        footage_groups,
+        video_duration,
+        width,
+        height,
+        segment_count,
+        visuals=None,
+        sentence_durations=None,
+    ):
+
+        # footage_groups: list of lists where footage_groups[i] holds
+        # the downloaded clip paths for visuals[i] (one group per
+        # narration sentence / visual query). The timeline is split
+        # into segment_count pieces; segment i draws its clips from
+        # group (i % len(footage_groups)) so every narration sentence
+        # keeps getting its own matched footage even when the same
+        # query has to cover multiple segments.
+
+        if segment_count is None or segment_count < 1:
+
+            if visuals:
+                segment_count = len(visuals)
+            else:
+                segment_count = sum(
+                    len(g) for g in footage_groups
+                )
+
+        total_clips = sum(len(g) for g in footage_groups)
+        segment_count = min(
+            segment_count,
+            max(total_clips, 1) * 4,
+        )
+
+        num_groups = len(footage_groups)
+
+        if num_groups == 0:
+            raise CompositionError(
+                "No footage groups were supplied, so the video "
+                "cannot be composed."
+            )
+
+        # Fallback pool: first non-empty group, or (defensively) a
+        # single None that will fail loudly downstream rather than
+        # silently compositing nothing.
+        fallback_pool = []
+        for g in footage_groups:
+            if g:
+                fallback_pool = g
+                break
+        if not fallback_pool:
+            fallback_pool = [None]
+
+        # When sentence_durations is provided, build segment boundaries
+        # that match the actual narration pacing: each sentence gets a
+        # segment whose duration equals its spoken length. This keeps
+        # visuals in sync with what is being said. Long sentences
+        # combine multiple clips from their group; short sentences cut
+        # a clip to fit.
+        use_sentence_timing = (
+            sentence_durations
+            and len(sentence_durations) == num_groups
+            and sum(sentence_durations) > 0
+        )
+
+        if use_sentence_timing:
+            # Normalise sentence durations to fit video_duration.
+            total_sentence_time = sum(sentence_durations)
+            scale = video_duration / total_sentence_time if total_sentence_time > 0 else 1.0
+            segment_starts = [0.0]
+            scaled_durations = []
+            for dur in sentence_durations:
+                scaled = dur * scale
+                scaled_durations.append(scaled)
+                segment_starts.append(segment_starts[-1] + scaled)
+            # Use per-sentence segments instead of the even-split count.
+            effective_segment_count = len(scaled_durations)
+            segment_duration = None  # not used in sentence-timing mode
+        else:
+            segment_duration = video_duration / segment_count
+            effective_segment_count = segment_count
+            scaled_durations = None
+            segment_starts = None
+
+        # Track per-group clip consumption so each query's clips are
+        # cycled independently instead of one global index across all
+        # groups.
+        group_counters = [0] * num_groups
+
+        frame_clips = []
+
+        for index in range(effective_segment_count):
+
+            if use_sentence_timing:
+                start = segment_starts[index]
+                needed = min(
+                    scaled_durations[index],
+                    video_duration - start
+                )
+            else:
+                start = index * segment_duration
+                needed = min(
+                    segment_duration,
+                    video_duration - start
+                )
+
+            if needed <= 0:
+
+                break
+
+            group_idx = index % num_groups
+            pool = footage_groups[group_idx]
+
+            if not pool:
+                pool = fallback_pool
+
+            # Use every downloaded clip from this query's group: the
+            # segment is divided equally across the group's clips so
+            # both clips per query contribute to the sentence (each
+            # clip is at least 5s, so two clips comfortably cover any
+            # sentence). Very short segments keep a single clip to
+            # avoid sub-second cuts.
+            usable_count = len(pool)
+            if needed / usable_count < MIN_CLIP_SHARE:
+                usable_count = 1
+
+            share = needed / usable_count
+
+            for _ in range(usable_count):
+
+                clip_index = (
+                    group_counters[group_idx]
+                    % len(pool)
+                )
+                group_counters[group_idx] += 1
+
+                source_path = pool[clip_index]
+
+                clip = VideoFileClip(
+                    str(
+                        source_path
+                    )
+                )
+
+                self._opened_sources.append(
+                    clip
+                )
+
+                try:
+
+                    if clip.duration > share + 0.05:
+
+                        clip = clip.subclipped(
+                            0,
+                            share
+                        )
+
+                    elif clip.duration < share - 0.05:
+
+                        clip = clip.with_effects(
+                            [
+                                vfx.Loop(
+                                    duration=share
+                                )
+                            ]
+                        )
+
+                    clip = (
+                        self._fit_to_frame(
+                            clip,
+                            width,
+                            height
+                        )
+                    )
+
+                    clip = (
+                        clip.without_audio()
+                        .with_start(
+                            start
+                        )
+                        .with_duration(
+                            share
+                        )
+                    )
+
+                    frame_clips.append(
+                        clip
+                    )
+
+                except Exception:
+                    self._close(
+                        clip
+                    )
+
+                    raise
+
+                start += share
+
+        if not frame_clips:
+
+            raise CompositionError(
+                "No usable footage segments could be "
+                "prepared."
+            )
+
+        return frame_clips
+
+    def _fit_to_frame(
+        self,
+        clip,
+        width,
+        height
+    ):
+
+        """
+        Center-crops the footage to the Shorts aspect ratio and
+        scales it to the output resolution.
+        """
+
+        clip_width, clip_height = (
+            clip.size
+        )
+
+        target_ratio = (
+            width
+            / height
+        )
+
+        source_ratio = (
+            clip_width
+            / clip_height
+        )
+
+        if source_ratio > target_ratio:
+
+            crop_width = int(
+                clip_height
+                * target_ratio
+            )
+
+            clip = clip.cropped(
+                width=crop_width
+            )
+
+        elif source_ratio < target_ratio:
+
+            crop_height = int(
+                clip_width
+                / target_ratio
+            )
+
+            clip = clip.cropped(
+                height=crop_height
+            )
+
+        if (
+            clip.size[0] != width
+            or clip.size[1] != height
+        ):
+
+            clip = clip.resized(
+                (
+                    width,
+                    height
+                )
+            )
+
+        return clip
+
+    def _build_caption_clips(
+        self,
+        cues,
+        width,
+        height
+    ):
+
+        if not self.captions_config.get(
+            "enabled",
+            True
+        ):
+
+            return []
+
+        if not cues:
+
+            return []
+
+        font_size = int(
+            self.captions_config.get(
+                "font_size",
+                62
+            )
+        )
+
+        text_color = str(
+            self.captions_config.get(
+                "text_color",
+                "white"
+            )
+        )
+
+        stroke_color = str(
+            self.captions_config.get(
+                "stroke_color",
+                "black"
+            )
+        )
+
+        stroke_width = int(
+            self.captions_config.get(
+                "stroke_width",
+                2
+            )
+        )
+
+        vertical_position = float(
+            self.captions_config.get(
+                "vertical_position",
+                0.75
+            )
+        )
+
+        font_path = (
+            self._resolve_font()
+        )
+
+        # Calculate Y position for captions
+        origin_y = int(
+            height
+            * vertical_position
+        )
+
+        # Captions for this channel carry whole phrases rather than single
+        # words, so the text can be far wider than the frame. Every cue is
+        # word-wrapped (never split) and shrunk if needed to stay inside the
+        # safe horizontal area, using the same measurement path as the
+        # TextClip renderer. Without this a long phrase would simply run off
+        # both edges of the video.
+        safe_caption_width = max(
+            100,
+            int(width * 0.92)
+            - 2 * stroke_width
+        )
+
+        caption_clips = []
+
+        for cue in cues:
+
+            cue_start = float(
+                cue["start"]
+            )
+
+            cue_end = float(
+                cue["end"]
+            )
+
+            if cue_end <= cue_start:
+
+                continue
+
+            text = str(
+                cue.get(
+                    "text",
+                    ""
+                )
+            ).strip()
+
+            if not text:
+
+                continue
+
+            # Wrap (and if necessary shrink) this cue so it always
+            # fits the frame horizontally. Word-level wrapping only -
+            # a word is never broken in half.
+            text, font_size = (
+                self._wrap_caption_text(
+                    text,
+                    font_path,
+                    font_size,
+                    stroke_width,
+                    safe_caption_width
+                )
+            )
+
+            # Load the font at the size the wrap step settled on.
+            try:
+                if font_path:
+                    font_pil = ImageFont.truetype(font_path, font_size)
+                else:
+                    font_pil = ImageFont.load_default()
+            except Exception:
+                font_pil = ImageFont.load_default()
+
+            # Calculate text size with padding for stroke and descenders
+            temp_img = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+            temp_draw = ImageDraw.Draw(temp_img)
+            
+            # Get text bounding box
+            bbox = temp_draw.textbbox((0, 0), text, font=font_pil)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            
+            # Add padding for stroke width and extra space for descenders
+            padding = stroke_width + 10
+            img_w = text_w + 2 * padding + 4
+            img_h = text_h + 2 * padding + 4
+
+            # Create transparent image for the caption
+            img = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+
+            # Position text with offset to account for bbox origin
+            x = padding - bbox[0]
+            y = padding - bbox[1]
+
+            # Draw stroke by drawing text at offsets
+            if stroke_width > 0:
+                for dx in range(-stroke_width, stroke_width + 1):
+                    for dy in range(-stroke_width, stroke_width + 1):
+                        if dx != 0 or dy != 0:
+                            draw.text(
+                                (x + dx, y + dy),
+                                text,
+                                font=font_pil,
+                                fill=(0, 0, 0, 255)
+                            )
+
+            # Draw main text
+            draw.text(
+                (x, y),
+                text,
+                font=font_pil,
+                fill=(255, 255, 255, 255)
+            )
+
+            # Convert to numpy array and create ImageClip
+            img_array = np.array(img)
+            clip = ImageClip(img_array)
+
+            caption_clips.append(
+                clip
+                .with_position(
+                    (
+                        "center",
+                        origin_y
+                    )
+                )
+                .with_start(
+                    cue_start
+                )
+                .with_end(
+                    cue_end
+                )
+            )
+
+        return caption_clips
+
+    def _make_caption_text_clip(
+        self,
+        text,
+        font,
+        font_size,
+        stroke_width,
+        text_color,
+        stroke_color,
+        caption_width,
+        frame_width
+    ):
+
+        """
+        Builds one caption TextClip with the text wrapped to the safe
+        caption area using real font measurements.
+
+        The final clip width is verified against the video frame, so
+        caption text can never be cut off at the horizontal edges of
+        the video. If the text renderer produces an image wider than
+        the frame (measurement differences between the wrap step and
+        the renderer), the font size is reduced and the text is
+        re-wrapped until it fits.
+        """
+
+        # Small safety margin so the rendered stroke never touches
+        # the edge of the text image.
+
+        safe_text_width = max(
+            100,
+            caption_width
+            - 2 * stroke_width
+            - 16
+        )
+
+        current_font_size = font_size
+
+        wrapped_text, current_font_size = (
+            self._wrap_caption_text(
+                text,
+                font,
+                current_font_size,
+                stroke_width,
+                safe_text_width
+            )
+        )
+
+        for _attempt in range(6):
+
+            clip = TextClip(
+                font=font,
+                text=wrapped_text + "\n",
+                font_size=current_font_size,
+                color=text_color,
+                stroke_color=stroke_color,
+                stroke_width=stroke_width,
+                method="caption",
+                size=(
+                    caption_width,
+                    None
+                ),
+                text_align="center"
+            )
+
+            if clip.size[0] <= frame_width:
+
+                return clip
+
+            clip.close()
+
+            current_font_size = max(
+                20,
+                current_font_size - 4
+            )
+
+            safe_text_width = max(
+                100,
+                int(
+                    caption_width
+                    * current_font_size
+                    / max(1, font_size)
+                )
+            )
+
+            wrapped_text, current_font_size = (
+                self._wrap_caption_text(
+                    text,
+                    font,
+                    current_font_size,
+                    stroke_width,
+                    safe_text_width
+                )
+            )
+
+        # Very defensive fallback - the smallest safe size.
+        return TextClip(
+            font=font,
+            text=wrapped_text + "\n",
+            font_size=current_font_size,
+            color=text_color,
+            stroke_color=stroke_color,
+            stroke_width=stroke_width,
+            method="caption",
+            size=(
+                caption_width,
+                None
+            ),
+            text_align="center"
+        )
+
+    def _wrap_caption_text(
+        self,
+        text,
+        font_path,
+        font_size,
+        stroke_width,
+        max_width
+    ):
+
+        """
+        Word-wraps caption text with real font measurements so
+        every line fits inside the safe horizontal area. Words are
+        never split: if a single word is wider than the safe area,
+        the font size is reduced until it fits (full words are
+        always visible, nothing is cut off horizontally).
+        """
+
+        words = str(
+            text
+        ).split()
+
+        if not words:
+
+            return text, font_size
+
+        image = Image.new(
+            "RGB",
+            (1, 1)
+        )
+
+        draw = ImageDraw.Draw(
+            image
+        )
+
+        def make_font(
+            size
+        ):
+
+            if font_path:
+
+                return ImageFont.truetype(
+                    font_path,
+                    size
+                )
+
+            return ImageFont.load_default(
+                size
+            )
+
+        def text_width(
+            value,
+            font_pil
+        ):
+
+            left, top, right, bottom = (
+                draw.textbbox(
+                    (0, 0),
+                    value,
+                    font=font_pil,
+                    stroke_width=stroke_width
+                )
+            )
+
+            return right - left
+
+        font_pil = make_font(
+            font_size
+        )
+
+        effective_size = font_size
+
+        longest_word = max(
+            words,
+            key=lambda word: text_width(
+                word,
+                font_pil
+            )
+        )
+
+        while (
+            effective_size > 20
+            and text_width(
+                longest_word,
+                font_pil
+            )
+            > max_width
+        ):
+
+            effective_size -= 2
+
+            font_pil = make_font(
+                effective_size
+            )
+
+        lines = []
+
+        current_line = ""
+
+        for word in words:
+
+            candidate = (
+                word
+                if not current_line
+                else current_line + " " + word
+            )
+
+            if (
+                text_width(
+                    candidate,
+                    font_pil
+                )
+                <= max_width
+                or not current_line
+            ):
+
+                current_line = candidate
+
+            else:
+
+                lines.append(
+                    current_line
+                )
+
+                current_line = word
+
+        if current_line:
+
+            lines.append(
+                current_line
+            )
+
+        return (
+            "\n".join(
+                lines
+            ),
+            effective_size
+        )
+
+    def _resolve_font(
+        self
+    ):
+
+        configured = str(
+            self.captions_config.get(
+                "font",
+                ""
+            )
+        ).strip()
+
+        candidates = []
+
+        if configured:
+
+            candidates.append(
+                configured
+            )
+
+        candidates.extend(
+            FONT_CANDIDATES
+        )
+
+        for candidate in candidates:
+
+            if candidate and Path(
+                candidate
+            ).is_file():
+
+                return candidate
+
+        return None
+
+    def _build_audio(
+        self,
+        narration,
+        video_duration,
+        episode_directory
+    ):
+
+        audio_tracks = []
+
+        narration_clip = AudioFileClip(
+            narration["audio_path"]
+        ).with_volume_scaled(
+            float(
+                self.audio_config.get(
+                    "narration",
+                    {}
+                ).get(
+                    "volume",
+                    1.0
+                )
+            )
+        )
+
+        audio_tracks.append(
+            narration_clip
+        )
+
+        music_clip = (
+            self._build_music(
+                video_duration,
+                episode_directory
+            )
+        )
+
+        if music_clip is not None:
+
+            audio_tracks.append(
+                music_clip
+            )
+
+        sfx_clips = (
+            self._build_sfx(
+                episode_directory,
+                video_duration
+            )
+        )
+
+        audio_tracks.extend(
+            sfx_clips
+        )
+
+        mixed = CompositeAudioClip(
+            audio_tracks
+        ).with_duration(
+            video_duration
+        )
+
+        return mixed
+
+    def _build_music(
+        self,
+        video_duration,
+        episode_directory
+    ):
+
+        """
+        Mixes the background music downloaded for this episode by
+        the music provider into the episode's music/ directory.
+        The track file is temporary - the production pipeline
+        deletes it after the render.
+        """
+
+        music_config = (
+            self.audio_config.get(
+                "music",
+                {}
+            )
+        )
+
+        if not music_config.get(
+            "enabled",
+            True
+        ):
+
+            return None
+
+        music_directory = (
+            Path(
+                episode_directory
+            )
+            /
+            "music"
+        )
+
+        music_files = (
+            self._list_audio_files(
+                music_directory
+            )
+        )
+
+        if not music_files:
+
+            return None
+
+        music_path = (
+            music_files[0]
+        )
+
+        music_clip = AudioFileClip(
+            str(
+                music_path
+            )
+        )
+
+        try:
+
+            looped = music_clip.with_effects(
+                [
+                    afx.AudioLoop(
+                        duration=video_duration
+                    )
+                ]
+            ).with_volume_scaled(
+                float(
+                    music_config.get(
+                        "volume",
+                        0.12
+                    )
+                )
+            )
+
+            return looped
+
+        except Exception:
+
+            self._close(
+                music_clip
+            )
+
+            raise
+
+    def _build_sfx(
+        self,
+        episode_directory,
+        video_duration
+    ):
+
+        """
+        Optional sound effects. Any audio file placed in the
+        episode sfx/ directory is mixed into the video. A numeric
+        prefix in the file name sets the offset:
+
+            sfx/1.5__whoosh.mp3  -> plays at 1.5 seconds
+
+        Files without a prefix play at 0 seconds.
+        """
+
+        sfx_config = (
+            self.audio_config.get(
+                "sfx",
+                {}
+            )
+        )
+
+        if not sfx_config.get(
+            "enabled",
+            False
+        ):
+
+            return []
+
+        sfx_directory = (
+            Path(
+                episode_directory
+            )
+            /
+            "sfx"
+        )
+
+        sfx_files = (
+            self._list_audio_files(
+                sfx_directory
+            )
+        )
+
+        volume = float(
+            sfx_config.get(
+                "volume",
+                0.6
+            )
+        )
+
+        clips = []
+
+        for sfx_path in sfx_files:
+
+            offset = (
+                self._offset_from_name(
+                    sfx_path
+                )
+            )
+
+            if offset >= video_duration:
+
+                continue
+
+            clip = AudioFileClip(
+                str(
+                    sfx_path
+                )
+            )
+
+            try:
+
+                clips.append(
+                    clip.with_start(
+                        offset
+                    ).with_volume_scaled(
+                        volume
+                    )
+                )
+
+            except Exception:
+
+                self._close(
+                    clip
+                )
+
+                raise
+
+        return clips
+
+    def _offset_from_name(
+        self,
+        path
+    ):
+
+        name = Path(
+            path
+        ).name
+
+        prefix = name.split(
+            "__",
+            1
+        )[0]
+
+        try:
+
+            return max(
+                0.0,
+                float(
+                    prefix
+                )
+            )
+
+        except ValueError:
+
+            return 0.0
+
+    def _list_audio_files(
+        self,
+        directory
+    ):
+
+        directory = Path(
+            directory
+        )
+
+        if not directory.is_absolute():
+
+            directory = (
+                self.project_root
+                /
+                directory
+            )
+
+        if not directory.is_dir():
+
+            return []
+
+        extensions = (
+            ".mp3",
+            ".wav",
+            ".m4a",
+            ".ogg"
+        )
+
+        files = [
+            path
+            for path in directory.iterdir()
+            if path.is_file()
+            and path.suffix.lower()
+            in extensions
+        ]
+
+        return sorted(
+            files
+        )
+
+    @staticmethod
+    def _silence(
+        duration,
+        fps=44100
+    ):
+
+        return AudioClip(
+            lambda t: np.zeros(
+                (
+                    np.size(t),
+                    2
+                ),
+                dtype=np.float32
+            ),
+            duration=duration,
+            fps=fps
+        )

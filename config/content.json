@@ -1,188 +1,108 @@
 {
-    "genre": "cinematic photorealistic biblical historical drama drawn from the four Gospels",
-    "tone": [
-        "reverent",
-        "intimate",
-        "compassionate",
-        "quietly powerful",
-        "solemn",
-        "hopeful",
-        "warm",
-        "tense and restrained",
-        "awe-filled",
-        "sorrowful but never despairing"
-    ],
-    "world": [
-        "rocky Galilean hillsides under warm morning light, dry grass moving in the wind",
-        "the shoreline of the Sea of Galilee at dawn, shallow waves lapping a pebble beach beside wooden fishing boats",
-        "dusty first-century streets of Capernaum with limestone walls and linen awnings",
-        "narrow Jerusalem stone alleyways crowded with robed pedestrians and hanging cloth",
-        "the Temple courts of Jerusalem, massive dressed-stone blocks and shaded colonnades",
-        "a first-century synagogue interior with stone walls, wooden benches, and oil lamps",
-        "a modest Jewish home courtyard with clay jars, woven mats, and whitewashed walls",
-        "an arid wilderness road winding through desert hills at midday heat",
-        "a hillside natural amphitheater where a seated crowd overlooks the lake",
-        "a small wooden fishing boat on calm water at golden hour",
-        "terraced olive groves and vineyards in soft evening light",
-        "a first-century marketplace with awnings, baskets, amphorae, and penned livestock",
-        "wheat fields and green pastures under a wide open sky",
-        "torchlit interiors at night, warm lamplight flickering on stone and timber",
-        "a quiet upper room with low tables, earthenware cups, and a single oil lamp",
-        "Roman-controlled roads and city gateways with stone arches and soldiers on patrol",
-        "wind-blown desert ridges and dry riverbeds under a hard blue sky",
-        "a windswept mountaintop above a sea of clouds at sunrise",
-        "a solemn rocky ridge under overcast light, weathered timber standing against gray sky",
-        "an empty rock-cut tomb entrance at dawn, cool blue light on stone, linen wrappings and spice jars nearby",
-        "ancient garden groves at night, moonlight filtering through olive branches"
-    ],
-    "protagonists": [
-        "Jesus: a first-century Jewish man from Galilee, approximately 30-35 years old, authentic Middle Eastern/Levantine features, warm olive-brown skin, deep brown eyes, dark brown wavy shoulder-length hair, a naturally full dark brown beard, a lean weathered face and a lean strong build, wearing a loose undyed off-white linen tunic, a muted earth-toned outer mantle, a simple cloth belt, and worn leather sandals - the central figure of the moment",
-        "a small group of first-century Jewish men in undyed wool and linen tunics, sandals, and cloth head coverings, seated or standing close as disciples listening",
-        "a crowd of first-century Jewish men, women, and children in simple dyed and undyed robes, mantles, and head coverings",
-        "a lone individual standing before Jesus in a simple frayed robe and mantle, emotionally vulnerable - a seeker, a sick person, or a skeptic",
-        "a Pharisee or scribe in a fine prayer shawl and layered robes holding a scroll, respectful but skeptical posture",
-        "a Roman soldier in period-accurate segmented armor, red tunic, and crested helmet standing at attention",
-        "first-century children in simple tunics watching quietly from the edge of a gathering",
-        "weathered Galilean fishermen mending flax nets beside wooden boats",
-        "a woman in a first-century linen mantle and head covering carrying an earthen water jar",
-        "a tax collector seated at a wooden table with coins, ledgers, and a linen awning overhead"
-    ],
-    "video": {
-        "duration_seconds": 8,
-        "aspect_ratio": "9:16",
-        "fps": 25,
-        "format": "mp4",
-        "resolution": {
-            "width": 1080,
-            "height": 1920
-        }
+    "channel": {
+        "name": "Hear His Voice",
+        "description": "A reverent short-form channel that lets Scripture speak for itself. Each episode is one passage of the World English Bible Catholic, read verbatim by a calm, warm narrator over cinematic stock footage, with the exact words captioned on screen. The viewer should feel as though they are hearing a living word rather than watching a video. NEVER sensational, NEVER clickbait, NEVER used out of context to manipulate. The Scripture is the star; the visuals only serve it."
     },
-    "audio": {
-        "enabled": true
+    "scripture": {
+        "scope": "Matthew, Mark, Luke, and John only. This limit is enforced in code, not by any list. The channel reads these four Gospels SEQUENTIALLY, rotating Matthew -> Mark -> Luke -> John, and each book continues from the next unread verse - so nothing decides what comes next except the reading position itself.",
+        "translation": "World English Bible Catholic (WEBC)",
+        "source": {
+            "provider": "ebible.org",
+            "edition": "eng-web-c",
+            "url": "https://ebible.org/Scriptures/eng-web-c_usfm.zip",
+            "license": "Public Domain",
+            "commercial_use": true,
+            "attribution": "The World English Bible is in the Public Domain. Copyright status: public domain. 'World English Bible' is a trademark of eBible.org. The text may be copied, published, broadcast, monetized, and redistributed; it must not be altered and still be called the World English Bible.",
+            "notes": [
+                "Midvash (https://api.midvash.com) was evaluated first and does NOT serve WEBC. GET /v1/versions?language=en returns 11 English translations and WEBC is not among them; GET /v1/versions/webc returns VERSION_NOT_FOUND. Midvash only serves the Protestant 'web' translation, which is a different translation set. The official WEBC USFM release from eBible.org is therefore used instead of silently substituting another translation.",
+                "The archive is downloaded once and cached under media/cache/scripture. It is the source of truth for every word spoken or captioned."
+            ]
+        },
+        "guidance_examples": [
+            "Matthew 3:13-17",
+            "Matthew 4:1-11",
+            "Matthew 4:18-22",
+            "Matthew 5:1-16",
+            "Matthew 5:44-48",
+            "Matthew 6:9-15",
+            "Matthew 6:25-34",
+            "Matthew 7:7-14",
+            "Matthew 8:23-27",
+            "Matthew 11:25-30",
+            "Matthew 13:3-23",
+            "Matthew 18:21-35",
+            "Matthew 22:34-40",
+            "Matthew 25:1-13",
+            "Matthew 27:45-54",
+            "Matthew 28:1-10",
+            "Matthew 28:16-20",
+            "Mark 4:35-41",
+            "Mark 5:21-43",
+            "Mark 8:34-38",
+            "Mark 9:33-37",
+            "Mark 10:27-30",
+            "Mark 12:28-31",
+            "Mark 14:61-65",
+            "Mark 16:15-20",
+            "Luke 4:16-21",
+            "Luke 6:20-23",
+            "Luke 6:27-38",
+            "Luke 10:25-37",
+            "Luke 11:1-4",
+            "Luke 12:22-34",
+            "Luke 14:25-33",
+            "Luke 15:11-32",
+            "Luke 18:13-17",
+            "Luke 19:1-10",
+            "Luke 22:14-20",
+            "Luke 22:31-38",
+            "Luke 23:33-38",
+            "Luke 24:25-32",
+            "John 1:1-18",
+            "John 2:1-11",
+            "John 3:16-30",
+            "John 4:16-26",
+            "John 5:36-39",
+            "John 6:5-15",
+            "John 9:1-12",
+            "John 10:10-18",
+            "John 11:20-27",
+            "John 11:25-37",
+            "John 13:31-35",
+            "John 14:6-9",
+            "John 14:15-23",
+            "John 14:27-31",
+            "John 15:1-17",
+            "John 16:25-33",
+            "John 17:15-23",
+            "John 20:11-18",
+            "John 20:19-23",
+            "John 21:1-14"
+        ]
     },
-    "generation": {
-        "clip_count": 1
-    },
-    "prompt_generation": {
-        "instructions": [
-            "Every concept must be based on an actual Bible passage from the four Gospels - Matthew, Mark, Luke, or John. The passage itself is the content.",
-            "Center every moment on Jesus: His words, His presence, His actions. He is the one figure every video must be instantly recognizable for.",
-            "Jesus must speak the exact Scripture text selected for the video. Never invent dialogue, never paraphrase His words, never add narration, commentary, motivational lines, or fictional speech before or after the Scripture.",
-            "Choose ONE powerful cinematic moment, never an entire story compressed into the runtime: a single moment of Jesus speaking, teaching, healing, comforting, praying, confronting, or acting carries the whole video.",
-            "Think Scripture first, visual second, cinematic execution third. Never start from a cool scene and then look for a verse to match it.",
-            "Do not manufacture drama, fictional events, or extra characters simply because they would look better visually. The Bible already contains the drama.",
-            "Keep the moment believable and emotionally restrained: one person speaking or acting naturally communicates far more than spectacle.",
-            "Show the emotional and thematic essence of the chosen passage in one honest, historically grounded image.",
-            "Write every person, place, object, and prop as explicit visual description; never depend on a biblical name alone to carry visual meaning.",
-            "Keep all imagery grounded in the first-century world of Judea and Galilee: authentic clothing, architecture, tools, and landscape; never modern objects, buildings, vehicles, or hairstyles.",
-            "Choose a passage Jesus can speak naturally within the approximately 8 second runtime - one calm breath of words at human speaking pace."
+    "content_generation": {
+        "words_per_second": 2.9,
+        "scripture_scope_note": "Episodes come only from Matthew, Mark, Luke, and John. That limit is enforced in code, not by the shape of any list. The scripture block below holds the WEBC source and the guidance examples; the passages themselves are drawn from the entire Gospel text at runtime.",
+        "visual_rules": [
+            "Generate one practical Pexels stock-footage search query per spoken segment. The viewer will hear the Scripture while seeing this footage, so the query must support the meaning of that specific segment without pretending to be the event itself.",
+            "Keep every query short, generally 2-5 words, using concrete nouns a human editor would actually type into Pexels.",
+            "Prefer scenes that exist as real stock footage: landscapes, light and weather, hands and craft, roads and journeys, water, fire, bread, hands raised in prayer, people listening, a lamp burning, an open book, fields at harvest.",
+            "Do NOT search for the literal miracle or person. There is no stock footage of Jesus, and queries like 'Jesus healing' or 'biblical drama' return unusable results. Search for the FEELING or SYMBOL the passage carries: 'light breaking through clouds', 'still water at dawn', 'a single candle in darkness', 'hands opening a letter'.",
+            "Do not invent specific named people, faces of actors playing biblical figures, or shots that could only exist as CGI. The footage must look like beautiful, reverent real-world cinematography.",
+            "Test each query mentally: if I typed this into Pexels, would several genuinely usable vertical clips come back? If not, choose a more practical phrase.",
+            "Avoid graphic, violent, frightening, or distressing imagery. Nothing should be horror, gore, wreckage, or disaster. The register is calm, dignified, and hopeful.",
+            "Avoid anything that would look wrong next to the Word of God: neon club lighting, arcade machines, fast cars, smartphones, modern corporate offices, meme-style reactions, text overlays, or watermarks.",
+            "Vary the queries across the episode so no two consecutive segments look alike. Avoid repeating the same noun more than twice.",
+            "When in doubt, choose the quieter, more timeless image. Light, sky, water, stone, wood, linen, bread, and hands are always safe."
         ],
         "creative_directions": [
-            "Vary cinematography to fit the Scripture: intimate close-ups for personal conversations, medium shots for teaching, over-the-shoulder framing for confrontations, wide environmental shots only when the setting itself carries meaning.",
-            "Favor medium shots, close-ups, and over-the-shoulder framing with shallow depth of field and natural camera movement; make every video look intentional rather than generic.",
-            "Let light carry emotion: warm dawn and golden-hour light for compassion, hard midday sun for confrontation, torchlight for intimacy, cool gray light for sorrow, first light for hope.",
-            "Use subtle natural motion - Jesus speaking with quiet hand gestures, hair and cloth stirring in the wind, grass moving, people shifting gently, water rippling, dust drifting through shafts of light.",
-            "Keep the environment authentic and alive: stone, wood, linen, clay, dust, and oil-lamp flame respond subtly to the moment without stealing focus.",
-            "Describe precisely what is visible, what moves, and where the shot lands; use active physical verbs and concrete visual nouns.",
-            "Keep the frame focused on Jesus and the moment around Him; secondary people should appear only when the passage includes them.",
-            "Vary composition across concepts: centered symmetry for authority, foreground framing through crowds, leading lines toward Jesus, layered depth, negative space, and intimate close perspectives.",
-            "Match detail density to the shot: close-ups need real skin texture, fabric weave, and facial cues; wide shots stay simpler and atmospheric.",
-            "Treat the music and sound as a score for the moment - music, ambient, and effects all serving the Scripture, never overpowering Jesus' voice.",
-            "Let the final image let the Scripture land: one frame that expresses the truth of the verse without words."
-        ],
-        "creative_priorities": [
-            "Scripture first: the exact passage drives every creative choice.",
-            "The viewer immediately understands: this is Jesus, this is His moment, these are His words.",
-            "See the moment, hear His voice, read His Word - the visual, the spoken Scripture, and the caption all serve the same passage.",
-            "One powerful, emotionally readable cinematic moment - never an entire story compressed into eight seconds.",
-            "Historically authentic, photorealistic, restrained, and emotionally human.",
-            "Jesus' spoken Scripture is clear, natural, and word-for-word exact.",
-            "A single moment that feels true rather than spectacular."
-        ],
-        "diversity_guidance": [
-            "Rotate freely across all four Gospels - Matthew, Mark, Luke, and John - rather than clustering on one book.",
-            "Rotate across the kinds of moments Jesus is present in: teaching crowds, speaking to individuals, miracles and healings, answering confrontation, praying, comforting, showing compassion, interacting with His disciples, delivering parables and I AM statements, quoting commandments and beatitudes, and moments from the crucifixion and resurrection.",
-            "Rotate settings naturally: hillsides, lakeshores, streets, homes, synagogues, marketplaces, roads, the Temple, gardens, boats, and deserts.",
-            "Vary shot scale, time of day, and composition between concepts so no two videos feel identical.",
-            "Vary emotional registers: gentle compassion, quiet authority, restrained sorrow, firm confrontation, warm joy, reverent awe.",
-            "Do not repeat a recent passage; the recent-concepts list shows what was already covered.",
-            "Do not default to the same well-known verse or the same setting two episodes in a row."
-        ],
-        "wow_factor_guidance": [
-            "Open on a clear image that reads instantly: Jesus in His moment, framed with room for the setting to breathe.",
-            "Let the emotional weight of the Scripture drive the moment - one honest beat lands harder than any spectacle.",
-            "The final frame should let the chosen verse resonate after His words finish.",
-            "Quiet power over drama: the viewer should feel they have witnessed something real."
-        ],
-        "living_subject_rules": [
-            "Whenever Jesus appears, describe Him explicitly in the prompt, every time; never rely on the name Jesus alone for the video model to understand who is shown.",
-            "Jesus' canonical appearance: a first-century Jewish man from Galilee, approximately 30-35 years old, authentic Middle Eastern/Levantine features, warm olive-brown skin, deep brown eyes, dark brown wavy shoulder-length hair, a naturally full dark brown beard, a lean weathered face from outdoor life with natural skin texture, and a lean strong physically active build - authentic, humble, and human, never model-like.",
-            "Jesus' clothing: a loose undyed off-white linen or wool tunic, a muted earth-toned outer mantle, a simple cloth belt, and worn leather sandals - natural, slightly rough fabric, practical and lightly weathered. Never ornate robes, medieval clothing, modern clothing, jewelry, fantasy costumes, modern tailoring, glowing garments, or exaggerated halos.",
-            "Keep Jesus' appearance and clothing consistent across videos unless the passage specifically requires a different state of dress.",
-            "Describe every other person explicitly too: approximate age, skin tone, hair, facial hair, build, expression, posture, and clothing, so no figure depends on a name.",
-            "Show emotion through visible physical cues - the face, hands, posture, and breath - never abstract labels.",
-            "Human bodies and faces must stay anatomically natural and realistically proportioned.",
-            "Depict suffering passages such as the crucifixion with historical gravity and restraint: no exploitative gore, no horror framing, no exaggerated wounds.",
-            "Inanimate objects and modern technology must never appear as subjects."
-        ],
-        "style_rotation": [
-            "Photorealistic cinematic biblical historical drama, grounded in first-century Judea and Galilee, realistic human anatomy and facial features, natural skin texture, authentic linen and wool fabrics, physically accurate lighting, cinematic depth of field, subtle natural movement, emotionally powerful but restrained, visually realistic and historically grounded, high-end live-action film quality"
-        ],
-        "ltx2_prompt_rules": [
-            "Write ONE continuous natural-language paragraph in English. No titles, headings, code fences, or markdown.",
-            "Start directly with: Style: <visual style>, <rest of the paragraph>. Use the exact visual style given in THIS EPISODE'S VISUAL STYLE.",
-            "SELF-CONTAINED VISUALS: every important element - people, ages, skin tones, hair, clothing, footwear, props, architecture, landscape, animals, weather, time of day - must be explicitly described in visual terms. Never assume the video model understands biblical names, historical periods, or figures on their own.",
-            "ESTABLISH THE SHOT: open right after Style with shot scale and framing in cinematic terms the model understands (medium shot, close-up, over-the-shoulder, medium two-shot, low-angle wide, shallow depth of field).",
-            "SET THE SCENE: establish the first-century environment, lighting source, color palette, surface textures, and atmosphere as the moment unfolds.",
-            "DEFINE JESUS: whenever Jesus is on screen, give His full canonical physical description and clothing in the paragraph - age, skin tone, hair, beard, build, tunic, mantle, belt, sandals - and show His emotional state through visible physical cues.",
-            "SPEECH - THE EXACT SCRIPTURE: Jesus speaks the exact Scripture text selected for the video. Put His spoken words in quotation marks in the paragraph, word for word as given in the SCRIPTURE field, with nothing added before, after, or inside the quote - no invented dialogue, no paraphrase, no narration, no commentary, no motivational words. Immediately follow the quote with a voice description.",
-            "Jesus' voice: a warm, deep, naturally masculine Middle Eastern/Levantine male voice of a man about 30-35 years old - calm, compassionate, intimate, grounded, sincere, quietly authoritative, natural rather than theatrical, with natural breathing and realistic pauses. No echo, no reverb, no choir, no artificial bass, no heavenly or supernatural voice effects.",
-            "Match His delivery to the passage: gentle and reassuring for compassion, calm and authoritative for teaching, restrained sadness for sorrow, firm and controlled for confrontation, warm and genuinely happy for joy. Do not overact.",
-            "DESCRIBE THE ACTION as one natural chronological sequence of what is visibly happening; keep it to a single moment that fits one continuous shot.",
-            "CAMERA: include at most one deliberate camera move, described relative to Jesus and its effect on the frame. A static locked shot is equally valid when the moment plays better still.",
-            "Use active present-progressive verbs (is walking, is speaking, is opening), not past tense or passive voice.",
-            "Maintain chronological flow using temporal connectors: as, then, while, when, until.",
-            "Describe the complete soundtrack within the single paragraph, integrated chronologically with the action: a clean, restrained background music score using simple recognizable instruments, subtle first-century environmental sounds, and specific effects. Name the exact instrument, mood, and source of every sound, never vague descriptions such as ambient sound is present.",
-            "The music sits underneath Jesus' voice and never competes with His words; no bombastic trailer music, no choir textures.",
-            "Visuals and audio only: do not include smell, taste, or touch.",
-            "Do NOT use timestamps, scene cuts, or phrases such as The scene opens with. Start directly with Style.",
-            "No modern objects, modern architecture, modern clothing, modern vehicles, or anachronisms of any kind.",
-            "Match detail density to shot scale: close-ups need fine texture, facial detail, and natural skin texture; wide shots stay simpler.",
-            "Be specific but restrained: concrete details such as lamplight on stone are good; intensifiers such as vibrant, blinding, breathtaking, or massive are not.",
-            "The final paragraph is the full prompt that will be fed directly to the video model, so every visual, Jesus' spoken Scripture, and every sound must be present in this single paragraph."
-        ],
-        "audio_guidance": [
-            "Jesus' spoken Scripture is the centerpiece of the audio: His exact words in quotes, delivered in a warm, deep Middle Eastern/Levantine male voice - calm, compassionate, grounded, quietly authoritative, with natural breathing and realistic pauses, delivery matched to the passage.",
-            "Never process Jesus' voice with echo, reverb, choir effects, artificial bass, or heavenly voice effects; keep it human, close, and clean.",
-            "Background music is required but restrained: name concrete, recognizable instruments (soft warm strings, gentle lyre-like plucked strings, a single woodwind, a soft frame drum) and a clear mood that serves the Scripture.",
-            "Keep the musical score simple: one or two instruments carrying a single motif, sitting beneath the voice. Avoid dense layering, bombastic orchestration, and choir textures.",
-            "Describe how the music moves with the moment: a gentle pulse at rest, rising softly with the words, resolving quietly on the final image.",
-            "Ambient and environmental sounds must be subtle and secondary to the voice - never louder than Jesus speaking. Name specific natural sources (wind through dry grass, distant crowd murmur, water lapping, fabric rustle, footsteps on stone).",
-            "Avoid audio that produces static, buzzing, humming, grinding, or distortion-like textures. Keep every sound clean, musical, and natural-sounding.",
-            "Let the music resolve quietly after His final words so the Scripture can land in near-silence."
-        ],
-        "prompt_format": {
-            "minimum_words_per_second": 12,
-            "maximum_words_per_second": 30,
-            "minimum_words_floor": 90,
-            "maximum_words_cap": 240
-        },
-        "generation_attempts": 3
-    },
-    "creative_engines": [
-        "Jesus speaking directly to one person - a single line of Scripture landing on a listening face",
-        "Jesus teaching a seated crowd from a hillside, one gesture carrying the moment",
-        "a single recognizable miracle gesture - a hand extended, a storm quieting, bread multiplied",
-        "a moment of healing - one touch or one spoken word and the change visible on a face",
-        "Jesus answering a confrontation with one calm, controlled sentence",
-        "a parable made visible in one honest image",
-        "Jesus praying - alone, looking upward, shoulders at rest",
-        "a moment of compassion - Jesus turning toward someone the crowd ignores",
-        "an I AM statement spoken with quiet, absolute authority",
-        "Jesus walking with His disciples along a road, one exchange in mid-step",
-        "a beatitude or commandment spoken as a single, memorable line",
-        "a disciple expressing faith and Jesus responding with warm affirmation",
-        "a sorrowful moment from the Passion carried by restraint rather than spectacle",
-        "the first light of the resurrection discovered in one quiet, astonishing frame"
-    ]
+            "You are directing the visuals for Scripture that is being read word for word. Your job is to make the viewer feel the passage, not to explain it.",
+            "Each segment's visual_direction is a single sentence describing the shot the viewer should see, in a reverent, cinematic, contemplative register.",
+            "Let the direction follow the passage's emotional movement: begin in stillness or question, build toward light and warmth, and settle into quiet resolve.",
+            "Favour natural light, shallow depth of field, slow camera movement, and calm negative space. Think of reverent documentary photography rather than dramatic action.",
+            "Do not use religious iconography that would be cheap or kitsch: no glowing halos, no beams of light from heaven, no cartoon angels, no stained-glass clichés, no crosses as decoration.",
+            "Honour the text's setting where it is filmable: hillsides, olive groves, the shore of a lake, stone streets, a lamplit room, a field, a road, a table set with bread.",
+            "The direction must never contradict or trivialize what is being said. If a verse is about comfort, the frame should feel like comfort; if it is about warning or urgency, the frame should feel sober and clear rather than frightening."
+        ]
+    }
 }

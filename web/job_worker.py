@@ -27,18 +27,21 @@ def emit(
 
 def emit_progress(
     percent,
-    message
+    message,
+    stage=None
 ):
 
     emit(
         PROGRESS_PREFIX,
         {
+            "type": "progress",
             "percent": int(
                 percent
             ),
             "message": str(
                 message
-            )
+            ),
+            "stage": stage
         }
     )
 
@@ -106,6 +109,13 @@ def main():
                 )
             ).strip()
 
+            reference = str(
+                payload.get(
+                    "reference",
+                    ""
+                )
+            ).strip()
+
             if episode_id:
 
                 result = (
@@ -118,7 +128,12 @@ def main():
 
                 result = (
                     pipeline.create_episode(
-                        prompt_only=prompt_only
+                        prompt_only=prompt_only,
+                        reference=(
+                            reference
+                            if reference
+                            else None
+                        )
                     )
                 )
 

@@ -30,6 +30,10 @@ from instagram import (
     config as instagram_config_module
 )
 
+from core.publishing import (
+    scripture_credit_lines
+)
+
 
 # Sections written into each episode's prompt.txt. Order here is the
 # order they appear in the file; missing sections (older episodes)
@@ -2295,15 +2299,22 @@ class RequestHandler(
 
             else:
 
-                caption_parts = [
-                    part
-                    for part in (
-                        title,
-                        summary,
-                        " ".join(tags)
+                # The Scripture credit sits with the closing lines,
+                # after the summary and immediately before the hashtags.
+                caption_parts = (
+                    [
+                        part
+                        for part in (
+                            title,
+                            summary,
+                        )
+                        if part.strip()
+                    ]
+                    + scripture_credit_lines(
+                        prompt_item.get("reference")
                     )
-                    if part.strip()
-                ]
+                    + [" ".join(tags)]
+                )
 
             self.send_json(
                 {

@@ -156,24 +156,25 @@ if not errorlevel 1 (
 echo.
 
 REM ---------------------------------------------------------------------------
-REM SnapGenAI Chrome
+REM Pexels Chrome
 REM
 REM Start a dedicated visible Chrome profile with remote debugging enabled.
-REM Selenium attaches to this browser instead of launching its own Chrome.
+REM The Pexels footage provider attaches to this browser instead of launching
+REM its own Chrome.
 REM
-REM The profile persists between runs so SnapGenAI login/session information
-REM can be reused.
+REM The profile persists between runs so filters and the Pexels session can
+REM be reused, which keeps downloads out of any Cloudflare challenge.
 
-set "SNAPGENAI_DEBUG_HOST=127.0.0.1"
+set "PEXELS_DEBUG_HOST=127.0.0.1"
 REM The debugging port is THIS project's own: two projects sharing one
 REM browser would fight over it, because the download redirect the
 REM provider applies is a browser-wide DevTools setting.
 
-set "SNAPGENAI_DEBUG_PORT=9225"
-set "SNAPGENAI_CHROME_PROFILE=%~dp0media\browser_profile\snapgenai"
+set "PEXELS_DEBUG_PORT=9225"
+set "PEXELS_CHROME_PROFILE=%~dp0media\browser_profile\pexels"
 
 echo ==========================================
-echo Starting SnapGenAI Chrome
+echo Starting Pexels Chrome
 echo ==========================================
 echo.
 
@@ -189,36 +190,36 @@ if not exist "%CHROME_EXE%" (
     exit /b 1
 )
 
-if not exist "%SNAPGENAI_CHROME_PROFILE%" mkdir "%SNAPGENAI_CHROME_PROFILE%"
+if not exist "%PEXELS_CHROME_PROFILE%" mkdir "%PEXELS_CHROME_PROFILE%"
 
 echo Chrome executable:
 echo %CHROME_EXE%
 echo.
 
 echo Chrome profile:
-echo %SNAPGENAI_CHROME_PROFILE%
+echo %PEXELS_CHROME_PROFILE%
 echo.
 
 echo Remote debugging:
-echo %SNAPGENAI_DEBUG_HOST%:%SNAPGENAI_DEBUG_PORT%
+echo %PEXELS_DEBUG_HOST%:%PEXELS_DEBUG_PORT%
 echo.
 
 REM Is a Chrome already listening on this project's port? If so it is
 REM this project's own browser from an earlier run - reuse it rather
 REM than starting a second one that Chrome would only forward to.
 
-curl -s --max-time 2 "http://%SNAPGENAI_DEBUG_HOST%:%SNAPGENAI_DEBUG_PORT%/json/version" >nul 2>&1
+curl -s --max-time 2 "http://%PEXELS_DEBUG_HOST%:%PEXELS_DEBUG_PORT%/json/version" >nul 2>&1
 
 if not errorlevel 1 (
-    echo SnapGenAI Chrome already listening on port %SNAPGENAI_DEBUG_PORT% - reusing it.
+    echo Pexels Chrome already listening on port %PEXELS_DEBUG_PORT% - reusing it.
     goto :after_chrome
 )
 
-start "Hear His Voice - SnapGenAI Chrome" "%CHROME_EXE%" --remote-debugging-address=%SNAPGENAI_DEBUG_HOST% --remote-debugging-port=%SNAPGENAI_DEBUG_PORT% --user-data-dir="%SNAPGENAI_CHROME_PROFILE%" "https://snapgen.ai/"
+start "Hear His Voice - Pexels Chrome" "%CHROME_EXE%" --remote-debugging-address=%PEXELS_DEBUG_HOST% --remote-debugging-port=%PEXELS_DEBUG_PORT% --user-data-dir="%PEXELS_CHROME_PROFILE%" "https://www.pexels.com/"
 
-echo SnapGenAI Chrome launched.
+echo Pexels Chrome launched.
 echo.
-echo Selenium will attach to this browser on port %SNAPGENAI_DEBUG_PORT%.
+echo Selenium will attach to this browser on port %PEXELS_DEBUG_PORT%.
 echo.
 
 timeout /t 3 /nobreak >nul
