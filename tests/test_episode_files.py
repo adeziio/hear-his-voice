@@ -38,6 +38,9 @@ CONTENT = {
     "title": "The Light of Love — John 3:16-17",
     "summary": "A reflection on divine love.",
     "narration": (
+        "God loved the world so much that he gave his only Son."
+    ),
+    "source_text": (
         "For God so loved the world, that he gave his only born Son."
     ),
     "mood": ["reverent", "hopeful"],
@@ -58,7 +61,8 @@ def episode_directory(tmp_path):
 def test_content_json_has_only_the_expected_keys(episode_directory):
     """
     content.json must carry exactly the keys the pipeline and UI rely
-    on - no copy of the Scripture text itself.
+    on: the telling that is spoken, the passage it was written from,
+    and the direction for filming it - and no reference field.
 
     The passage reference is not stored. It lives in the
     title, and neither the YouTube description nor the Instagram caption
@@ -81,6 +85,7 @@ def test_content_json_has_only_the_expected_keys(episode_directory):
     ) == [
         "mood",
         "narration",
+        "source_text",
         "summary",
         "title",
         "visuals",

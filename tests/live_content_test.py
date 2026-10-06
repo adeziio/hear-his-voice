@@ -8,8 +8,8 @@ Usage:
 
 This stops before the video stage, because Pexels needs an interactive
 browser session. It verifies that the passage really came from WEBC,
-that the AI only produced visual direction, and that the saved content
-carries the verbatim text.
+that the narration is an original telling held faithful to that
+passage, and that the saved content carries both of them.
 """
 
 import json
@@ -28,6 +28,10 @@ sys.path.insert(
 
 from core.pipeline import HearHisVoicePipeline
 from scripture.webc import WEBCScripture
+from ai.content_generator import (
+    narration_problems,
+    verbatim_sentence_overlap,
+)
 
 
 def main():
@@ -66,31 +70,54 @@ def main():
         )
     )
 
-    # Prove the narration is the exact WEBC text by re-reading the
-    # passage straight from the source and comparing.
+    # The episode carries both the telling and the passage it was
+    # written from. Re-read the passage straight from WEBC to prove
+    # the stored source really is the source.
     bible = WEBCScripture()
 
-    # The reference now lives in the title, so pull it back out and
-    # re-read the passage from WEBC to prove the narration is verbatim.
     title = content["title"]
 
-    reference = (
-        title[
-            title.rfind("(") + 1:
-            title.rfind(")")
-        ]
-        if "(" in title and title.endswith(")")
-        else reference
-    )
+    # The reference lives in the title as "Title — Book 1:2-3", and it
+    # is the reference of the passage actually spoken - a window given
+    # on the command line may have been sized down to it.
+    if " — " in title:
 
-    bible = WEBCScripture()
+        reference = title.rsplit(
+            " — ",
+            1
+        )[-1]
 
     expected = (
         bible.get_reference_text(reference)
     )
 
-    assert content["narration"] == expected["text"], (
-        "The narration does not match the WEBC source."
+    assert content["source_text"] == expected["text"], (
+        "The stored source does not match the WEBC text."
+    )
+
+    # The telling is faithful to that source: every name kept, no
+    # commentary, no reference spoken, nothing invented.
+    problems = narration_problems(
+        content["source_text"],
+        content["narration"],
+    )
+
+    assert problems == [], problems
+
+    # And it is a telling rather than the passage in disguise.
+    assert content["narration"] != content["source_text"], (
+        "The narration is the passage verbatim - no telling was "
+        "produced."
+    )
+
+    overlap = verbatim_sentence_overlap(
+        content["source_text"],
+        content["narration"],
+    )
+
+    assert overlap < 0.5, (
+        f"The narration repeats {overlap:.0%} of the passage's "
+        "sentences word for word."
     )
 
     print()
@@ -101,6 +128,8 @@ def main():
     print("Summary    :", content["summary"])
     print("Mood       :", content["mood"])
     print("Visuals    :", len(content["visuals"]))
+    print("Reference  :", reference)
+    print("Overlap    :", f"{overlap:.0%}")
     print()
     print("Keys       :", sorted(content.keys()))
     print()
@@ -117,8 +146,14 @@ def main():
 
     assert reloaded["title"] == content["title"]
     assert reloaded["narration"] == content["narration"]
+    assert reloaded["source_text"] == content["source_text"]
 
-    print("SCRIPTURE AS SPOKEN (verbatim WEBC)")
+    print("THE PASSAGE (WEBC - THE SOURCE OF TRUTH)")
+    print("-" * 68)
+    print(content["source_text"])
+    print()
+
+    print("THE NARRATION (WHAT WILL BE SPOKEN)")
     print("-" * 68)
     print(content["narration"])
     print()
@@ -136,6 +171,53 @@ def main():
     print("Saved:", saved)
     print("content.json re-read and verified.")
     print()
+
+    # The publishing metadata still carries the reference in the title
+    # and the WEBC attribution in the description and the caption -
+    # and never the passage itself.
+    from core.publishing import (
+        SCRIPTURE_ATTRIBUTION,
+        build_caption,
+    )
+    from youtube.metadata_generator import (
+        generate_metadata_from_prompt,
+    )
+
+    metadata = generate_metadata_from_prompt(
+        {
+            "title": content["title"],
+            "summary": content["summary"],
+        },
+        episode_directory.name,
+    )
+
+    caption = build_caption(
+        content["title"],
+        content["summary"],
+        metadata["tags"],
+    )
+
+    assert reference in metadata["title"], metadata["title"]
+
+    for published in (metadata["description"], caption):
+
+        assert SCRIPTURE_ATTRIBUTION in published
+
+        assert published.count(reference) == 1, (
+            "the reference must appear exactly once, in the title "
+            f"line, not {published.count(reference)} times"
+        )
+
+        assert (
+            content["source_text"][:60]
+            not in published
+        ), "the passage itself was published"
+
+    print("PUBLISHING METADATA (YOUTUBE DESCRIPTION)")
+    print("-" * 68)
+    print(metadata["description"])
+    print()
+
     print("LIVE CONTENT TEST PASSED")
 
 

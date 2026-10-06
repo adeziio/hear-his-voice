@@ -1,12 +1,13 @@
 """
 Runs the video stage for real, using the real WEBC passage, the real
-edge-tts narration, the real caption builder, and the real composer.
+telling written from it, the real edge-tts narration, the real caption
+builder, and the real composer.
 
 The only thing stubbed is the Pexels footage provider: downloading
 stock footage needs an interactive browser session, so synthetic colour
-clips stand in for it. Everything that touches Scripture - narration,
-captions, segment timing, composition and rendering - is the real code
-running on the real passage.
+clips stand in for it. Everything that touches the episode - the
+narration and its source, captions, segment timing, composition and
+rendering - is the real code running on the real passage.
 
 Usage:
     python tests/live_video_test.py [Reference]
@@ -33,6 +34,7 @@ from core.pipeline import HearHisVoicePipeline
 from production.footage.base import VideoProvider
 from production import video as production_video
 from scripture.webc import WEBCScripture
+from ai.content_generator import narration_problems
 
 
 class StubFootageProvider(VideoProvider):
@@ -118,20 +120,31 @@ def main():
 
     title = content["title"]
 
-    reference = (
-        title[
-            title.rfind("(") + 1:
-            title.rfind(")")
-        ]
-        if "(" in title and title.endswith(")")
-        else reference
-    )
+    # The reference lives in the title as "Title — Book 1:2-3", and it
+    # is the reference of the passage actually spoken - a window given
+    # on the command line may have been sized down to it.
+    if " — " in title:
+
+        reference = title.rsplit(
+            " — ",
+            1
+        )[-1]
 
     expected = (
         bible.get_reference_text(reference)
     )
 
-    assert content["narration"] == expected["text"]
+    # The passage is stored exactly as WEBC gives it...
+    assert content["source_text"] == expected["text"]
+
+    # ...and the narration is a telling of it that passes every
+    # fidelity check, rather than the passage itself.
+    assert narration_problems(
+        content["source_text"],
+        content["narration"],
+    ) == []
+
+    assert content["narration"] != content["source_text"]
 
     print()
     print(f"Episode   : {episode_directory.name}")

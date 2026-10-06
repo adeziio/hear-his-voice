@@ -2,8 +2,9 @@
 Verifies the WEBC Scripture source.
 
 These tests hit the real eBible.org WEBC release, which is the point:
-the exact wording is what the episode will speak, so it is checked
-against the real archive rather than a fixture.
+the exact wording is what the episode's narration is written from and
+held to, so it is checked against the real archive rather than a
+fixture.
 
 Run with:  python -m pytest tests/test_scripture_source.py -v
 """
@@ -38,6 +39,7 @@ from scripture.segmenter import (
 from core.config_loader import ConfigLoader
 from ai.content_generator import (
     ContentGenerator,
+    ContentGenerationError,
     DIRECTION_SCHEMA
 )
 
@@ -221,16 +223,25 @@ def test_the_ai_cannot_change_the_scripture(
     """
     The central guarantee of the channel.
 
-    Whatever the AI returns - including a deliberate attempt to inject
-    its own version of the passage - the narration and the spoken
-    segments must remain the verbatim WEBC text.
+    The episode speaks the telling it was given - never whatever the
+    visual-direction model returned - and the passage itself is kept
+    unchanged beside it as source_text, verse for verse.
     """
     scripture = bible.get_reference_text(
         "John 3:16-17"
     )
 
+    told = (
+        "God loved the world so much that he gave his only Son, so "
+        "that everyone who believes in him might have eternal life "
+        "rather than perish, and the world might be saved through him."
+    )
+
     segments = generator.build_segments(
-        scripture
+        dict(
+            scripture,
+            text=told,
+        )
     )
 
     hostile_direction = {
@@ -253,30 +264,37 @@ def test_the_ai_cannot_change_the_scripture(
     content = generator.assemble_content(
         scripture,
         segments,
-        hostile_direction
+        hostile_direction,
+        told,
     )
 
-    # The narration is the WEBC string, byte for byte.
+    # The narration is the telling it was handed, byte for byte.
     assert (
         content["narration"]
+        == told
+    )
+
+    # The passage survives untouched as the source of the episode.
+    assert (
+        content["source_text"]
         == scripture["text"]
     )
 
-    # Rejoining the spoken segments reproduces the same passage.
+    # Rejoining the spoken segments reproduces the telling.
     assert (
         " ".join(
             segment
             for segment in segments
         ).split()
-        == scripture["text"].split()
+        == told.split()
     )
 
-    # Every verse WEBC returned survives into the narration.
+    # Every verse WEBC returned survives, word for word, in source_text.
     for item in scripture["passage"]:
 
         assert (
             item["text"]
-            in content["narration"]
+            in content["source_text"]
         )
 
     # And the AI still contributed its creative direction, with the
@@ -296,10 +314,42 @@ def test_the_ai_cannot_change_the_scripture(
     )
 
 
+def test_a_passage_with_no_telling_of_its_own_is_rejected(
+    bible,
+    generator
+):
+    """
+    The source is authoritative context, never a narration fallback.
+    Assembly must reject a missing original telling rather than publish
+    the WEBC text as if it were independently written narration.
+    """
+    scripture = bible.get_reference_text(
+        "John 3:16-17"
+    )
+
+    segments = generator.build_segments(
+        scripture
+    )
+
+    with pytest.raises(ContentGenerationError, match="cannot be used as a narration fallback"):
+        generator.assemble_content(
+            scripture,
+            segments,
+            {
+                "title": "T",
+                "summary": "S",
+                "mood": "reverent",
+                "visuals": [],
+            },
+        )
+
+
 def test_the_schema_has_no_field_for_scripture_text():
     """
-    The model's response shape contains no narration field, so there is
-    nowhere for it to put Bible text even if it tried.
+    The visual-direction model's response shape contains no narration
+    field, so there is nowhere for it to put Bible text even if it
+    tried. The telling comes from the separate NARRATION_SCHEMA call,
+    which is held to the passage by narration_problems().
     """
     properties = set(
         DIRECTION_SCHEMA["properties"]
@@ -347,7 +397,8 @@ def test_a_blank_search_query_falls_back_to_the_segment(
                     "visual_direction": "",
                 }
             ]
-        }
+        },
+        "The LORD cares for me like a shepherd, so I lack nothing."
     )
 
     query = content["visuals"][0]["search_query"]
@@ -378,7 +429,8 @@ def test_one_visual_per_segment(
             "summary": "A summary.",
             "mood": "gentle",
             "visuals": [],
-        }
+        },
+        "The LORD cares for me like a shepherd, so I lack nothing."
     )
 
     assert len(
@@ -414,7 +466,8 @@ def test_mood_is_normalised_for_music_matching(
             "summary": "S",
             "mood": "Reverent, HOPEFUL, reverent, gentle",
             "visuals": [],
-        }
+        },
+        "God loved the world so deeply that he gave his only Son, so everyone who trusts him may have eternal life."
     )
 
     assert content["mood"] == [

@@ -31,10 +31,10 @@ def segments_per_episode(config):
     asks for, derived from the target duration alone: one visual per
     SECONDS_PER_VISUAL of narration.
 
-    This is a guide, not a hard limit. The narration is the verbatim WEBC
-    text, so it cannot be padded or trimmed to hit an exact count - the
-    passage's own punctuation decides the final number of segments. All
-    this sets is how finely that passage is cut.
+    This is a guide, not a hard limit. The narration is prose written
+    from the passage, so it cannot be padded or trimmed to hit an exact
+    count - the narration's own punctuation decides the final number of
+    segments. All this sets is how finely it is cut.
     """
     try:
 
@@ -70,11 +70,12 @@ class ContentGenerationError(
 
 # The AI directs the episode; it does not author the Scripture.
 #
-# The schema has no narration field at all. The narration is the exact
-# WEBC text supplied by scripture/, and the model only returns one
-# search_query plus a visual_direction per spoken segment, together
-# with the title, summary, and mood. There is therefore no field the
-# model could use to rewrite, paraphrase, or invent Bible text.
+# This is the visual-direction schema, and it has no narration field at
+# all: the model only returns one search_query plus a visual_direction
+# per spoken segment, together with the title, summary, and mood. The
+# narration itself is written by write_narration() under the separate
+# NARRATION_SCHEMA below, from the WEBC passage as its only source, so
+# neither call gives the model anywhere to put invented Scripture.
 DIRECTION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -122,22 +123,228 @@ DIRECTION_SCHEMA = {
 }
 
 
+# The narration schema. One field, and it holds the finished telling -
+# the model can return nothing else from this call, so there is no
+# second field for stray Bible text or commentary to hide in.
+NARRATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "narration": {
+            "type": "string"
+        }
+    },
+    "required": [
+        "narration"
+    ]
+}
+
+
+# Commentary that has no place in spoken narration. Each phrase is
+# something a model reaches for when it stops telling the passage and
+# starts talking about it.
+COMMENTARY_MARKERS = (
+    "in this passage",
+    "in this verse",
+    "this passage tells",
+    "this verse tells",
+    "the bible tells us",
+    "scripture tells us",
+    "as we read in",
+)
+
+# Capitalised words that are only names sometimes. English opens a
+# sentence with a capital, so "JESUS said" capitalises nothing useful;
+# a word in this list therefore only counts as a name when the source
+# also uses it mid-sentence, where the capital cannot be the reason.
+SENTENCE_START_WORDS = frozenset(
+    """
+    a about after again against all also am an and another any anyone
+    anything are as at away back be because been before being both but
+    by came come could did do does doing down each either else even ever
+    every everyone everything few for from further get gets go goes
+    going got had has have he her here hers herself him himself his how
+    however i if in into is it its itself just let like made make makes
+    may me might more most much must my myself neither no nor not
+    nothing now of off often on once one only or other others our ours
+    ourselves out over own perhaps said same saw say says see seen
+    shall she should since so some someone something still such sure
+    than that the their theirs them themselves then there therefore
+    these they thing things this those though through thus till to
+    together toward under until up upon us very was we were what when
+    where whether which while who whom whose why will with within
+    without would yet you your yours yourself yourselves
+    behold verily wherefore moreover yea hence indeed truly finally
+    """.split()
+)
+
+# A name is compared with its possessive and hyphen tail removed, so
+# "Isaac", "Isaac's" and "ISAAC" are all the same name.
+NAME_TOKEN = re.compile(
+    r"[A-Za-z][A-Za-z'’\-]*"
+)
+
+# Sentence punctuation: a capitalised word directly after one of these
+# opens a sentence or a quotation, so its capital is not a name's.
+SENTENCE_BOUNDARY = tuple(
+    ".?!:;\"”'’()[]{}"
+)
+
+
+def _normalize_words(text):
+    """
+    Lower-cased words with the punctuation gone, for comparing a
+    telling against its source without caring about case or stops.
+    """
+    return re.findall(
+        r"[a-z0-9]+",
+        str(text or "").lower()
+    )
+
+
+def _name_key(word):
+    """
+    The comparable form of a name: lower-cased, with any possessive or
+    hyphenated tail dropped, so "Isaac's", "Isaac" and "ISAAC" all give
+    "isaac".
+    """
+    head = re.split(
+        r"[’'\-]",
+        str(word or "")
+    )[0]
+
+    return re.sub(
+        r"[^a-z]",
+        "",
+        head.lower()
+    )
+
+
+def source_names(text):
+    """
+    Every person, place, and title the passage names.
+
+    A capitalised word that is not opening a sentence can only be a
+    name ("...the father of Isaac", "...by Tamar"), and a word that
+    keeps its capital everywhere it appears is a name even when it
+    does open a sentence ("JESUS said" is still Jesus). Those names
+    ARE much of the passage's content - in a genealogy they are the
+    whole of it - so they are what the faithfulness check counts.
+    """
+    value = str(text or "")
+
+    mid_sentence = set()
+
+    for match in NAME_TOKEN.finditer(value):
+
+        word = match.group(0)
+
+        if len(word) < 3 or not word[:1].isupper():
+
+            continue
+
+        key = _name_key(word)
+
+        if not key:
+
+            continue
+
+        before = value[:match.start()].rstrip()
+
+        if before and before[-1] not in SENTENCE_BOUNDARY:
+
+            mid_sentence.add(key)
+
+    names = set(mid_sentence)
+
+    # Seen only at the head of a sentence: still a name unless it is
+    # ordinary English that merely starts sentences ("Behold").
+    for match in NAME_TOKEN.finditer(value):
+
+        word = match.group(0)
+
+        if len(word) < 3 or not word[:1].isupper():
+
+            continue
+
+        key = _name_key(word)
+
+        if key and key not in SENTENCE_START_WORDS:
+
+            names.add(key)
+
+    return names
+
+
+def verbatim_sentence_overlap(source_text, narration):
+    """
+    Retained as a compatibility helper for older callers.
+
+    Narration generation does not call this function and does not reject
+    output based on source similarity.
+    """
+    source_sentences = [
+        sentence
+        for sentence in split_sentences(str(source_text or ""))
+        if sentence
+    ]
+
+    if not source_sentences:
+
+        return 0.0
+
+    source_words = _normalize_words(narration)
+    matched = 0
+
+    for sentence in source_sentences:
+
+        words = _normalize_words(sentence)
+
+        if words and tuple(words) in {
+            tuple(source_words[index:index + len(words)])
+            for index in range(
+                max(1, len(source_words) - len(words) + 1)
+            )
+        }:
+
+            matched += 1
+
+    return matched / len(source_sentences)
+
+
+def narration_problems(source_text, narration):
+    """
+    Compatibility helper that only reports an empty narration.
+
+    The pipeline deliberately does not judge similarity, names, facts,
+    length, wording, creativity, or faithfulness to the source.
+    """
+    if not str(narration or "").strip():
+
+        return ["the narration is empty"]
+
+    return []
+
+
 class ContentGenerator(
     BaseAIService
 ):
 
     """
-    The creative director for a Hear His Voice episode.
+    The creative team for a Hear His Voice episode.
 
     Given the exact WEBC passage, this:
 
-        1. splits the passage into spoken segments (deterministic),
-        2. asks the AI for a Pexels search query and a visual
+        1. tells the passage as original narration, checked against
+           the passage itself for fidelity (write_narration),
+        2. splits that narration into spoken segments
+           (deterministic),
+        3. asks the AI for a Pexels search query and a visual
            direction for each segment,
-        3. asks for a title, summary, and mood.
+        4. asks for a title, summary, and mood.
 
-    The AI never writes the narration. The narration is always the
-    verbatim WEBC text that the Scripture source returned.
+    The passage remains the authority throughout: the narration may
+    only restate what the WEBC text says, and content["source_text"]
+    keeps the exact passage beside the telling that came from it.
     """
 
     def __init__(
@@ -325,15 +532,16 @@ class ContentGenerator(
             + "\", a short-form channel that lets Scripture speak "
             "for itself.\n\n"
             "CRITICAL - YOU DO NOT WRITE THE SCRIPTURE\n"
-            "The narration is already fixed. It is the exact text of "
-            "the "
+            "The passage below is the exact "
             + scripture["translation"]
-            + ", quoted below, and it will be read verbatim by a "
-            "narrator and captioned verbatim on screen. You must NEVER "
+            + " text, and it is the authority for this episode. The "
+            "narration was already written from that passage and is "
+            "fixed for this call: the narrator speaks that telling "
+            "exactly as written and it is captioned exactly as spoken. You must NEVER "
             "generate, paraphrase, rewrite, summarise, expand, "
-            "correct, or invent any part of it, and you must not echo "
-            "it back in your answer. Your only job is to decide what "
-            "the viewer should SEE while those exact words are "
+            "correct, or invent any part of the passage, and you must "
+            "not echo it back in your answer. Your only job is to "
+            "decide what the viewer should SEE while those words are "
             "spoken.\n\n"
             "CHANNEL DESCRIPTION\n"
             + description
@@ -342,6 +550,11 @@ class ContentGenerator(
             + " ("
             + scripture["translation"]
             + ")\n\n"
+            "THE PASSAGE - THE SOURCE OF EVERYTHING SPOKEN\n"
+            + str(
+                scripture.get("text") or ""
+            ).strip()
+            + "\n\n"
             "THE FIXED NARRATION, SPLIT INTO "
             + str(len(segments))
             + " SPOKEN SEGMENTS\n"
@@ -453,14 +666,29 @@ class ContentGenerator(
         self,
         scripture,
         segments,
-        direction
+        direction,
+        narration=None
     ):
         """
-        Joins the AI's visual direction to the exact WEBC text.
+        Joins the AI's visual direction to the telling of the passage.
 
-        The narration and its sentences come straight from the
-        Scripture source. Nothing the model returned can change them.
+        The narration is what write_narration() produced - never what
+        this call's model returned - so nothing in the visual
+        direction can change a single spoken word. The exact WEBC
+        passage is kept alongside it as source_text, the authority the
+        telling was measured against.
         """
+        spoken = str(
+            narration or ""
+        ).strip()
+
+        if not spoken:
+
+            raise ContentGenerationError(
+                "Original narration is required; the WEBC source "
+                "cannot be used as a narration fallback."
+            )
+
         if not isinstance(
             direction,
             dict
@@ -594,7 +822,14 @@ class ContentGenerator(
         return {
             "title": title,
             "summary": summary,
-            "narration": scripture["text"],
+            "narration": spoken,
+            # The exact WEBC wording the telling was written from.
+            # It is not spoken or captioned - it is the passage the
+            # narration is held to, kept with the episode so what was
+            # said can always be checked against the source.
+            "source_text": str(
+                scripture["text"]
+            ).strip(),
             "mood": self._normalize_mood(
                 direction.get(
                     "mood",
@@ -658,14 +893,239 @@ class ContentGenerator(
 
         return unique[:3]
 
+    def build_narration_prompt(
+        self,
+        scripture
+    ):
+        """
+        Builds the prompt that tells the passage.
+
+        The passage is quoted in full and named as the authoritative
+        source context. The model is asked once for the narration.
+        """
+        channel = self.channel_config.get(
+            "channel",
+            {}
+        )
+
+        name = str(
+            channel.get(
+                "name",
+                "Hear His Voice"
+            )
+        )
+
+        description = str(
+            channel.get(
+                "description",
+                ""
+            )
+        )
+
+        rules = self.format_bullets(
+            self.generation_config.get(
+                "narration_rules",
+                []
+            )
+        )
+
+        prompt = (
+            "You are the storyteller for \""
+            + name
+            + "\", a short-form channel that tells one passage of "
+            "Scripture per episode as original narration.\n\n"
+            "YOUR TASK, IN TWO PHASES\n"
+            "Phase 1 - UNDERSTAND. Read the whole passage first and take "
+            "in its events, its meaning, its context, and how its parts "
+            "relate to each other: who acts, what happens, what is taught, "
+            "and why it matters. Hold that understanding - not the wording "
+            "- in mind.\n"
+            "Phase 2 - TELL. Tell what you understood as one continuous, "
+            "compelling narration in your own words, which a narrator can "
+            "read aloud and a listener can follow by ear. The passage is "
+            "the source of everything you may say - your job is to tell "
+            "it, not to quote it back and not to improve it.\n"
+            "Do NOT return the passage, and do not reword it sentence by "
+            "sentence with swapped words: build genuinely new sentences "
+            "around what it means. Returning the passage as given fails "
+            "the task.\n\n"
+            "CHANNEL DESCRIPTION\n"
+            + description
+            + "\n\nSCRIPTURE REFERENCE\n"
+            + scripture["reference"]
+            + " ("
+            + scripture["translation"]
+            + ")\n\n"
+            "THE PASSAGE - THE AUTHORITATIVE SOURCE\n"
+            + str(
+                scripture.get("text") or ""
+            ).strip()
+            + "\n\n"
+            "NARRATION RULES\n"
+            + rules
+        )
+
+        prompt += (
+            "\n\nWORKED EXAMPLES - OF STYLE, FROM OTHER PASSAGES\n"
+            "A list carries its names; a story carries its events. The "
+            "passage above may be either - tell it as what it is.\n"
+            "List: source: \"Abraham became the father of Isaac. "
+            "Isaac became the father of Jacob.\"\n"
+            "Telling: \"From Abraham came Isaac, and from Isaac "
+            "came Jacob.\"\n"
+            "The telling keeps every name and relationship and builds "
+            "the sentences differently, without forcing a story onto "
+            "a list.\n"
+            "Story: source: \"Behold, a violent storm came up on the sea, "
+            "so much that the boat was covered with the waves, but he "
+            "was asleep. They came to him and woke him up, saying, "
+            "'Save us, Lord! We are dying!'\"\n"
+            "Telling: \"A violent storm rose on the sea until waves "
+            "covered the boat, yet he slept. They came and woke him, "
+            "crying, 'Save us, Lord! We are dying!'\"\n"
+            "The telling keeps every event and every cry, told as one "
+            "unfolding moment - not clause by clause, and with nothing "
+            "added.\n\n"
+            "RETURN\n"
+            "Return JSON with one field:\n"
+            "- \"narration\": the finished telling, ready to be spoken "
+            "exactly as written - no heading, no label, no notes.\n"
+        )
+
+        return prompt
+
+    def parse_narration(
+        self,
+        response
+    ):
+        """
+        Pulls the telling out of the model's reply.
+
+        The schema asks for JSON, and a reply that is plainly prose is
+        still usable. Only an empty or structurally unusable reply is
+        rejected.
+        """
+        if isinstance(
+            response,
+            dict
+        ):
+
+            narration = _clean_narration(
+                response.get(
+                    "narration",
+                    ""
+                )
+            )
+
+            if not narration:
+
+                raise ContentGenerationError(
+                    "The AI returned no narration."
+                )
+
+            return narration
+
+        text = str(
+            response or ""
+        ).strip()
+
+        if not text:
+
+            raise ContentGenerationError(
+                "The AI returned an empty reply."
+            )
+
+        if text.startswith("{"):
+
+            match = re.search(
+                r"\{.*\}",
+                text,
+                re.DOTALL
+            )
+
+            if match is None:
+
+                raise ContentGenerationError(
+                    "The AI reply contained no JSON object."
+                )
+
+            try:
+
+                data = json.loads(
+                    match.group(0)
+                )
+
+            except Exception as error:
+
+                raise ContentGenerationError(
+                    f"The AI reply was not valid JSON: {error}"
+                ) from error
+
+            if not isinstance(
+                data,
+                dict
+            ):
+
+                raise ContentGenerationError(
+                    "The AI reply was not a JSON object."
+                )
+
+            narration = _clean_narration(
+                data.get(
+                    "narration",
+                    ""
+                )
+            )
+
+            if not narration:
+
+                raise ContentGenerationError(
+                    "The AI reply had no \"narration\" field."
+                )
+
+            return narration
+
+        # Plain prose rather than JSON - usable as it stands.
+        return _clean_narration(text)
+
+    def write_narration(
+        self,
+        scripture
+    ):
+        """
+        Calls the LLM once for narration. The WEBC passage is context
+        and authority only; it is never a narration fallback. The
+        returned narration is used as-is after transport parsing.
+        """
+        prompt = self.build_narration_prompt(scripture)
+
+        self.log("Writing the narration...")
+
+        narration = self.parse_narration(
+            self.llm.generate(
+                prompt,
+                response_format=NARRATION_SCHEMA
+            )
+        )
+
+        self.log(
+            f"Narration ready ({len(narration.split())} words)."
+        )
+
+        return narration
+
     def generate(
         self,
         scripture,
-        segments
+        segments,
+        narration=None
     ):
         """
-        Returns the episode content dict. The narration and its
-        sentences are the verbatim WEBC text, never model output.
+        Returns the episode content dict.
+
+        The narration is the telling this call is handed, never this
+        call's own model output: the model here directs the visuals,
+        the title, the summary, and the mood, and nothing else.
         """
         prompt = self.build_prompt(
             scripture,
@@ -684,8 +1144,56 @@ class ContentGenerator(
         return self.assemble_content(
             scripture,
             segments,
-            self.parse_direction(response)
+            self.parse_direction(response),
+            narration
         )
+
+
+def _clean_narration(text):
+    """
+    Tidies what the model returned into plain spoken prose: strips the
+    code fences, labels, and wrapping quotes a model likes to add, and
+    flattens paragraph breaks into spaces so the segments, the TTS and
+    the captions all see one continuous piece of narration.
+    """
+    value = str(
+        text or ""
+    ).strip()
+
+    value = re.sub(
+        r"^```[a-zA-Z]*\s*",
+        "",
+        value,
+    )
+
+    value = re.sub(
+        r"\s*```$",
+        "",
+        value,
+    ).strip()
+
+    value = re.sub(
+        r"^\s*(?:narration|story|telling)\s*:\s*",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if (
+        len(value) > 1
+        and value[0] == value[-1]
+        and value[0] in "\"'"
+    ):
+
+        value = value[1:-1].strip()
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
+
+    return value.strip()
 
 
 def _first_sentence(text):

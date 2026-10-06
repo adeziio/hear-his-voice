@@ -4,7 +4,8 @@ Verifies the passage-selection scope and the visual segmentation.
 Three guarantees are checked:
 
 1. Every selectable passage is a Gospel passage in which Jesus speaks.
-2. Scripture stays exact WEBC text through selection and segmentation.
+2. Selection and segmentation never alter the words they are given:
+   what comes out is exactly what went in, in the same order.
 3. Each passage gets enough distinct visual segments, sized to the
    narration so the video keeps changing.
 
@@ -260,8 +261,9 @@ def test_no_epistles_acts_revelation_or_old_testament(selector):
 def test_the_target_only_chooses_how_much_is_spoken():
     """
     There is a target duration, and it is used to take more or fewer
-    whole verses from a passage. It never changes the words, and the
-    Scripture on screen stays verbatim.
+    whole verses from a passage. It never changes the words: the
+    passage handed to the pipeline stays the exact WEBC text, and the
+    narration is told from it.
     """
     selector = PassageSelector(ConfigLoader().load_all())
 

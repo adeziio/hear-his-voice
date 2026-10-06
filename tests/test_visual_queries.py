@@ -195,7 +195,12 @@ def test_the_search_query_field_is_told_to_support_the_meaning():
 # Everything out of scope stays out of scope
 # --------------------------------------------------------------------------
 
-def test_the_narration_is_still_never_model_written():
+def test_the_visual_prompt_still_forbids_writing_scripture():
+    """
+    The telling has its own call and its own schema; this prompt is
+    still only for what the viewer sees, and it still may not touch a
+    word of Scripture or of the narration spoken over it.
+    """
     prompt = _prompt()
 
     assert (
@@ -204,6 +209,19 @@ def test_the_narration_is_still_never_model_written():
     )
 
     assert "must NEVER generate" in prompt
+
+
+def test_the_prompt_quotes_the_passage_it_directs_visuals_for():
+    """
+    The visual director now sees both the passage and the telling cut
+    into segments, so every query can be chosen for what the segment
+    actually means.
+    """
+    prompt = _prompt()
+
+    assert SCRIPTURE["text"] in prompt
+
+    assert SEGMENTS[0] in prompt
 
 
 def test_the_title_and_summary_rules_are_untouched():

@@ -1,7 +1,7 @@
 {
     "channel": {
         "name": "Hear His Voice",
-        "description": "A reverent short-form channel that lets Scripture speak for itself. Each episode is one passage of the World English Bible Catholic, read verbatim by a calm, warm narrator over cinematic stock footage, with the exact words captioned on screen. The viewer should feel as though they are hearing a living word rather than watching a video. NEVER sensational, NEVER clickbait, NEVER used out of context to manipulate. The Scripture is the star; the visuals only serve it."
+        "description": "A reverent short-form channel that tells one passage of Scripture per episode as original, engaging narration held faithful to the passage, spoken by a calm, warm narrator over cinematic stock footage, with the exact spoken words captioned on screen. The viewer should feel as though they are hearing a living word rather than watching a video. NEVER sensational, NEVER clickbait, NEVER used out of context to manipulate. The Scripture is the star; the visuals only serve it."
     },
     "scripture": {
         "scope": "Matthew, Mark, Luke, and John only. This limit is enforced in code, not by any list. The channel reads these four Gospels SEQUENTIALLY, rotating Matthew -> Mark -> Luke -> John, and each book continues from the next unread verse - so nothing decides what comes next except the reading position itself.",
@@ -83,6 +83,21 @@
     "content_generation": {
         "words_per_second": 2.9,
         "scripture_scope_note": "Episodes come only from Matthew, Mark, Luke, and John. That limit is enforced in code, not by the shape of any list. The scripture block below holds the WEBC source and the guidance examples; the passages themselves are drawn from the entire Gospel text at runtime.",
+        "narration_rules": [
+            "First UNDERSTAND, then tell. Before writing a single word of narration, read the whole passage and grasp its events, its meaning, its context, and how its parts relate to each other - who acts, what happens, what is taught, and why it matters. The telling comes out of that understanding, never out of rewording the sentences one by one.",
+            "Keep every fact, event, teaching, name, relationship, number, place, and time marker from the passage. Leave none of it out, contradict none of it, soften none of it, and explain none of it.",
+            "Do NOT paraphrase the passage mechanically, verse by verse or clause by clause. Never follow the source's sentence structure with swapped words. A listener must not be able to line your sentences up against the verses.",
+            "For passages that tell of events - a journey, a miracle, a parable, a teaching with movement - tell one compelling, coherent story with natural flow and pacing: set the scene, let events unfold in an order that serves the telling, combine related facts and moments into single natural sentences, and land the meaning where the passage lands it.",
+            "For list-like passages that carry no narrative of their own - genealogies, censuses, inventories of names - do NOT force artificial storytelling, invented scenes, or dramatic arcs onto them. Carry the list naturally and concisely in original language: group related names where the passage groups them, keep every name, every relationship, and the order exactly as given, and let the telling be dignified and unhurried.",
+            "Do NOT invent anything: no dialogue the passage does not speak, no thoughts or feelings it does not state, no motives for why anyone acts, no events it does not record, no details it does not give. If the passage does not say it, the narration does not say it.",
+            "Write for the ear. This is engaging storytelling in plain reverent English, told aloud to a listener - not read from a page, not summarised, not explained. Short sentences carry weight; vary their rhythm so the telling breathes.",
+            "No preface, no commentary, no application, no closing reflection. Begin inside the passage itself and end where the passage ends.",
+            "Never mention chapters, verses, a reference, the translation, or that this is a retelling. Never speak the Scripture reference aloud: the reference lives in the episode title, never in the narration.",
+            "Speak of the people and God only as the passage speaks of them. Every name in the passage must appear in the telling, spelled exactly as the passage spells it. A title or description the passage never uses - prophet, king, Son of God, Messiah - must never appear, even when true elsewhere.",
+            "Do not copy the passage's sentences. Vary how each step is introduced, merge short parallel clauses, and break long ones where the ear needs breath - the goal is original language carrying the same facts.",
+            "No headings, labels, stage directions, lists, or notes: return only the narration itself.",
+            "Keep the telling about the length of the passage - no less than half of it and no more than twice it, and always between 40 and 400 words."
+        ],
         "visual_rules": [
             "Generate exactly one Pexels search query per spoken segment. The viewer hears the Scripture while watching this footage, so every query must be chosen for THAT segment and must visibly earn its place next to the words being spoken.",
             "Base each query on the MEANING, THEME, SETTING, MOOD or IMAGERY of its segment. Decide what this passage is actually about, then search for footage that carries that sense - not for a prop that merely happens to appear somewhere in the sentence.",
@@ -99,7 +114,7 @@
             "Before returning each query, test it: if I typed this into Pexels, would several genuinely usable reverent clips come back, and would they support this specific verse? If either answer is no, choose a more meaningful and more practical phrase."
         ],
         "creative_directions": [
-            "You are directing the visuals for Scripture that is being read word for word. Your job is to make the viewer feel the passage, not to explain it.",
+            "You are directing the visuals for an original narration that tells one passage of Scripture faithfully. Your job is to make the viewer feel the passage, not to explain it.",
             "Each segment's visual_direction is a single sentence describing the shot the viewer should see, in a reverent, cinematic, contemplative register.",
             "Let the direction follow the passage's emotional movement: begin in stillness or question, build toward light and warmth, and settle into quiet resolve.",
             "Favour natural light, shallow depth of field, slow camera movement, and calm negative space. Think of reverent documentary photography rather than dramatic action.",

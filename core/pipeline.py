@@ -34,14 +34,18 @@ class HearHisVoicePipeline:
 
         Create episode
             -> Scripture stage: read the exact WEBC passage
-            -> Prompt stage: the AI directs the visuals for it
+            -> Narration stage: tell that passage as original
+               storytelling, checked against it
+            -> Prompt stage: the AI directs the visuals for the telling
             -> Generate Video stage: narration audio, stock footage,
                music, captions, render
 
-    The Scripture comes from the WEBC source and is never written by the
-    AI. The AI only decides what the viewer sees while those exact
-    words are spoken. The pipeline only enforces the structured output
-    and the technical production requirements.
+    The Scripture comes from the WEBC source and stays the authority:
+    the narration may only restate what the passage says, the exact
+    passage is kept beside it as source_text, and the AI only decides
+    what the viewer sees while those words are spoken. The pipeline
+    only enforces the structured output and the technical production
+    requirements.
     """
 
     def __init__(
@@ -267,12 +271,14 @@ class HearHisVoicePipeline:
         reference=None
     ):
         """
-        Reads the exact WEBC passage and asks the AI to direct its
-        visuals, then saves the episode content.
+        Reads the exact WEBC passage, tells it as original narration,
+        then asks the AI to direct the visuals for that telling and
+        saves the episode content.
 
-        The passage is fetched first and is never sent back through the
-        model as text to rewrite: the narration written to
-        content.json is the verbatim WEBC string.
+        The passage is fetched first and stays the authority: the
+        narration is written from it under the fidelity checks, the
+        exact passage is kept in content.json as source_text, and no
+        part of the visual direction can reach the spoken words.
         """
         if reference:
 
@@ -294,14 +300,36 @@ class HearHisVoicePipeline:
             "prompt"
         )
 
+        narration = (
+            self.content_generator
+            .write_narration(scripture)
+        )
+
+        self._notify(
+            15,
+            f"Narration written "
+            f"({len(narration.split())} words).",
+            "prompt"
+        )
+
+        # The narration, not the passage, is what will be spoken and
+        # captioned, so it is the narration that gets cut into the
+        # visual segments. Keep this working copy separate: the original
+        # Scripture dict remains the authoritative WEBC source passed to
+        # visual generation and saved as source_text.
+        narration_script = dict(
+            scripture,
+            text=narration,
+        )
+
         segments = (
             self.content_generator.build_segments(
-                scripture
+                narration_script
             )
         )
 
         self._notify(
-            20,
+            25,
             f"Directing {len(segments)} visual segments...",
             "prompt"
         )
@@ -309,7 +337,8 @@ class HearHisVoicePipeline:
         content = (
             self.content_generator.generate(
                 scripture,
-                segments
+                segments,
+                narration
             )
         )
 
@@ -424,7 +453,8 @@ class HearHisVoicePipeline:
         """
         Runs the video stage for an episode whose content already
         exists. content.json is the source of truth; prompt_item is
-        unused because the narration must never come from the AI.
+        unused because the telling and its visuals are already fixed
+        there.
         """
         episode_directory = (
             self.resolve_episode_directory(

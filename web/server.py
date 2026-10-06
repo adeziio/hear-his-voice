@@ -2281,9 +2281,8 @@ class RequestHandler(
                 or []
             )
 
-            # title -> summary -> attribution -> hashtags, assembled by
-            # the shared helper so the caption cannot drift from the
-            # description.
+            # title -> summary -> hashtags, assembled by the shared
+            # helper so the caption cannot drift from the description.
             caption_parts = build_caption(
                 title,
                 summary,

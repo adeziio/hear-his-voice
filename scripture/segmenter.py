@@ -2,8 +2,9 @@ import re
 
 
 # A spoken segment ends at sentence punctuation. The wording inside a
-# segment is never touched, so the narration always speaks the exact
-# WEBC text; only the boundaries between segments are chosen here.
+# segment is never touched: the segmenter only chooses boundaries, so
+# whatever text it is given comes back word for word, ready to speak
+# and caption exactly as it was written.
 SENTENCE_SPLIT = re.compile(
     r"(?<=[.!?…”’\"])\s+"
 )
@@ -20,7 +21,7 @@ CLAUSE_SPLIT = re.compile(
 
 def split_sentences(text):
     """
-    Splits exact Scripture text into sentence-sized pieces at existing
+    Splits narration text into sentence-sized pieces at existing
     punctuation. No word is added, removed, or reordered - the
     concatenation of the result is the original text.
     """
@@ -101,12 +102,13 @@ def build_visual_segments(
     max_words_per_segment=26,
 ):
     """
-    Breaks exact Scripture text into the spoken segments that each get
-    their own Pexels query and visual direction.
+    Breaks the narration into the spoken segments that each get their
+    own Pexels query and visual direction.
 
     The text is only ever cut at punctuation that is already in it.
     Joining the result with single spaces reproduces the input exactly,
-    so the narration and captions still speak the verbatim WEBC text.
+    so the narration and captions still speak what they were given,
+    word for word.
     """
     atoms = []
 
@@ -188,7 +190,8 @@ def build_visual_segments(
     # A clause can still be very short - a bare "Amen." closing a
     # prayer, or a one-word reply. Alone that would give the viewer a
     # single-word visual, so any such fragment is folded into the
-    # segment beside it. Joining with one space keeps the text verbatim.
+    # segment beside it. Joining with one space keeps the text itself
+    # unchanged - only the boundaries move.
     minimum_words = 3
 
     while len(segments) > 1:
@@ -234,7 +237,7 @@ def group_into_segments(
     passage reads at a natural pace for a short-form video.
 
     Grouping only changes where a visual cut happens; the spoken words
-    and their order stay exactly as the WEBC gives them.
+    and their order stay exactly as the input gives them.
     """
     sentences = [
         sentence

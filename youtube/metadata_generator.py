@@ -1,17 +1,15 @@
 """
 Builds the prefill metadata for an episode.
 
-The Scripture is public domain, but the World English Bible name is a
-trademark of eBible.org and the edition is identified as WEBC, so the
-reference and translation are always shown with the text. The passage is
-posted verbatim and is never edited.
+The narration is an original telling written from the Gospel passage,
+not the WEBC text, so what is published is the title, the summary, and
+the hashtags - never the passage itself and never a translation
+attribution. WEBC stays internal as the authoritative source.
 """
+
 
 from youtube.config import (
     get_metadata_defaults
-)
-from core.publishing import (
-    scripture_credit_lines
 )
 
 
@@ -62,10 +60,10 @@ def generate_metadata_from_prompt(
             f"{title} {title_suffix}"
         ).strip()
 
-    # The exact WEBC wording that was spoken, straight from the
-    # episode content. It is never re-typed or reworded here, and it is
-    # deliberately NOT published: the whole passage is already in the
-    # video, so repeating it is noise in the search results.
+    # The short summary of the passage, straight from the episode
+    # content. It is never re-typed or reworded here, and the passage
+    # itself is deliberately NOT published: it is spoken in the video,
+    # so repeating it is noise in the search results.
     summary = str(
         prompt_item.get("summary") or ""
     ).strip()
@@ -74,17 +72,14 @@ def generate_metadata_from_prompt(
         defaults.get("tags") or DEFAULT_TAGS
     )
 
-    # The WEBC attribution. This is the channel's extra description line,
-    # so it sits in the same slot every channel uses, between the summary
-    # and the hashtags.
-    credit = scripture_credit_lines()
-
     # title -> summary -> extra lines -> hashtags
     #
     # The title leads the description, which is what every channel here
     # does. It carries the passage reference, and that is deliberate: the
     # reference appears once in the title itself, and the leading line is
     # that same title rather than a separate restatement of the reference.
+    # No translation attribution is published: the narration is original
+    # wording, not WEBC text.
     lines = []
 
     if base_title:
@@ -100,8 +95,6 @@ def generate_metadata_from_prompt(
             defaults.get("description_extra_lines") or []
         )
     )
-
-    lines.extend(credit)
 
     lines.append(" ".join(tags))
 

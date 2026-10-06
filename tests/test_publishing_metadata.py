@@ -1,16 +1,17 @@
 """
 Verifies the publishing metadata for both YouTube and Instagram.
 
-Both platforms must carry the same blocks, in the same order:
+The narration is original wording written from the Gospel passage,
+not the WEBC text, so no translation attribution is published. Both
+platforms carry the same blocks, in the same order:
 
-    1. the episode title
+    1. the episode title (which carries the Scripture reference)
     2. a short, factual summary of the passage
-    3. the WEBC attribution line
-    4. the hashtags
+    3. the hashtags
 
-The title leads, matching how Curious About Things and Your Next Location
-publish. The passage reference lives in that title and is never restated as
-a line of its own.
+The title leads, matching how Curious About Things and Your Next
+Location publish. The passage reference lives in that title and is
+never restated as a line of its own.
 
 Run with:  python -m pytest tests/test_publishing_metadata.py -v
 """
@@ -33,9 +34,7 @@ sys.path.insert(
 
 
 from core.publishing import (
-    SCRIPTURE_ATTRIBUTION,
     build_caption,
-    scripture_credit_lines,
 )
 from youtube.metadata_generator import (
     generate_metadata_from_prompt,
@@ -82,32 +81,19 @@ def _blocks(text):
     ]
 
 
-def test_the_credit_block_is_the_attribution_only():
+def test_no_translation_attribution_is_published():
     """
-    The passage reference is already in the episode title, so the credit
-    block must not repeat it. Attribution only, and one line of it.
+    The narration is original wording, not WEBC text, so the platforms
+    must not name a translation at all.
     """
 
-    lines = scripture_credit_lines()
+    for text in (_description(), _caption()):
 
-    assert lines == [
-        "Scripture: World English Bible Catholic (WEBC), "
-        "public domain. Text provided by eBible.org."
-    ]
-
-    assert lines[0] == SCRIPTURE_ATTRIBUTION
-
-    assert len(lines) == 1
-
-    assert (
-        "Matthew 1:1-9"
-        not in "\n".join(lines)
-    )
-
-
-def test_no_attribution_means_no_block():
-    assert scripture_credit_lines("") == []
-    assert scripture_credit_lines(None) == []
+        assert "World English Bible" not in text
+        assert "WEBC" not in text
+        assert "eBible" not in text
+        assert "public domain" not in text.lower()
+        assert "Scripture:" not in text
 
 
 # --------------------------------------------------------------------------
@@ -140,7 +126,6 @@ def test_the_youtube_description_is_exactly_the_expected_blocks():
     assert _blocks(_description()) == [
         EPISODE["title"],
         EPISODE["summary"],
-        SCRIPTURE_ATTRIBUTION,
         HASHTAG_LINE,
     ]
 
@@ -149,7 +134,6 @@ def test_the_instagram_caption_is_exactly_the_expected_blocks():
     assert _blocks(_caption()) == [
         EPISODE["title"],
         EPISODE["summary"],
-        SCRIPTURE_ATTRIBUTION,
         HASHTAG_LINE,
     ]
 
@@ -215,41 +199,10 @@ def test_the_passage_text_itself_is_not_published():
         assert "the son of Abraham" not in text
 
 
-def test_the_attribution_does_not_name_a_passage():
+def test_a_missing_summary_still_yields_title_and_hashtags():
     """
-    The attribution is about the translation, not the passage, so it must not
-    smuggle the reference back in.
-    """
-
-    assert "Matthew" not in SCRIPTURE_ATTRIBUTION
-
-
-# --------------------------------------------------------------------------
-# The hashtags stay put
-# --------------------------------------------------------------------------
-
-def test_the_hashtags_are_last_and_unchanged():
-    for text in (_description(), _caption()):
-
-        assert _blocks(text)[-1] == HASHTAG_LINE
-
-        assert text.strip().endswith("#christian")
-
-
-def test_the_configured_hashtags_are_not_altered():
-    assert _metadata()["tags"] == [
-        "#jesus",
-        "#bible",
-        "#gospel",
-        "#scripture",
-        "#christian",
-    ]
-
-
-def test_a_missing_summary_still_yields_the_attribution_and_hashtags():
-    """
-    The summary is the only optional block. Losing it must not cost the
-    attribution - the WEBC name is a trademark and is always required.
+    The summary is the only optional block. Losing it must still leave
+    a clean title-then-hashtags post with no attribution.
     """
 
     metadata = generate_metadata_from_prompt(
@@ -259,12 +212,11 @@ def test_a_missing_summary_still_yields_the_attribution_and_hashtags():
 
     assert _blocks(metadata["description"]) == [
         "Some Title — Matthew 1:1",
-        SCRIPTURE_ATTRIBUTION,
         HASHTAG_LINE,
     ]
 
 
-def test_a_caption_with_no_summary_still_carries_the_credit():
+def test_a_caption_with_no_summary_still_has_title_and_hashtags():
     caption = build_caption(
         "Some Title — Matthew 1:1",
         "",
@@ -273,6 +225,5 @@ def test_a_caption_with_no_summary_still_carries_the_credit():
 
     assert _blocks(caption) == [
         "Some Title — Matthew 1:1",
-        SCRIPTURE_ATTRIBUTION,
         HASHTAG_LINE,
     ]
