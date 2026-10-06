@@ -1,5 +1,5 @@
 {
-    "video_provider": "pexels",
+    "video_provider": "snapgenai",
     "music_provider": "freesafemusic",
     "shorts": {
         "target_duration_seconds": 60,

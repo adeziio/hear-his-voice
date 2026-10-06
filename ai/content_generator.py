@@ -71,8 +71,8 @@ class ContentGenerationError(
 # The AI directs the episode; it does not author the Scripture.
 #
 # This is the visual-direction schema, and it has no narration field at
-# all: the model only returns one search_query plus a visual_direction
-# per spoken segment, together with the title, summary, and mood. The
+# all: the model returns one overall-passage search_query plus a
+# visual_direction, together with the title, summary, and mood. The
 # narration itself is written by write_narration() under the separate
 # NARRATION_SCHEMA below, from the WEBC passage as its only source, so
 # neither call gives the model anywhere to put invented Scripture.
@@ -97,6 +97,8 @@ DIRECTION_SCHEMA = {
         },
         "visuals": {
             "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
             "items": {
                 "type": "object",
                 "properties": {
@@ -338,8 +340,8 @@ class ContentGenerator(
            the passage itself for fidelity (write_narration),
         2. splits that narration into spoken segments
            (deterministic),
-        3. asks the AI for a Pexels search query and a visual
-           direction for each segment,
+        3. asks the AI for one SnapGenAI prompt describing the overall
+           passage,
         4. asks for a title, summary, and mood.
 
     The passage remains the authority throughout: the narration may
@@ -393,8 +395,9 @@ class ContentGenerator(
         scripture
     ):
         """
-        Splits the exact WEBC text into spoken segments, each of
-        which gets its own Pexels query and visual direction.
+        Splits the exact WEBC text into spoken segments for the existing
+        narration/composition timeline. Visual generation uses the whole
+        passage and does not create one prompt per segment.
 
         The count follows the passage's own length, aiming at one
         visual every few seconds and never letting a single visual
@@ -517,15 +520,6 @@ class ContentGenerator(
             )
         )
 
-        segment_lines = "\n".join(
-            f"{index}. SEGMENT: {segment}\n"
-            f"   Return exactly one visuals entry for this segment."
-            for index, segment in enumerate(
-                segments,
-                start=1
-            )
-        )
-
         return (
             "You are the visual director for \""
             + name
@@ -555,33 +549,29 @@ class ContentGenerator(
                 scripture.get("text") or ""
             ).strip()
             + "\n\n"
-            "THE FIXED NARRATION, SPLIT INTO "
-            + str(len(segments))
-            + " SPOKEN SEGMENTS\n"
-            + segment_lines
-            + "\n\nVISUAL SEARCH QUERY RULES\n"
-            "Each search_query is a Pexels search phrase. The viewer "
-            "hears this segment's words while watching the footage it "
-            "returns, so every query must support the meaning of its "
-            "own segment.\n"
+            "THE FIXED NARRATION\n"
+            + " ".join(str(segment) for segment in segments)
+            + "\n\nVISUAL PROMPT RULES\n"
+            "Create one prompt for the entire Gospel passage, not one "
+            "prompt for individual segments or narration parts. The "
+            "prompt will be sent to SnapGenAI to generate one visual clip "
+            "for the whole episode. Make it straightforward and "
+            "descriptive: identify the main scene, subject, setting, and "
+            "atmosphere. Begin with 'Style: realistic.' Do not write a "
+            "stock-footage search query, narration, explanation, or list.\n"
             + visual_rules
-            + "\n\nVISUAL DIRECTION\n"
+            + "\n\nVISUAL STYLE\n"
             + creative_directions
             + "\n\nFINAL OUTPUT\n"
-            "Return exactly "
-            + str(len(segments))
-            + " objects in \"visuals\", one per segment, in the same "
-            "order as the segments above. Each object has exactly two "
-            "fields:\n"
-            "- \"search_query\": a Pexels stock footage search phrase "
-            "(2-5 words) chosen because it SUPPORTS THE MEANING of that "
-            "segment - its theme, setting, era or mood. It must be a "
-            "phrase that genuinely returns usable reverent stock "
-            "footage, and it must never be a literal attempt to film a "
-            "biblical person, a family relationship, or an event.\n"
-            "- \"visual_direction\": one sentence describing the shot "
-            "the viewer should see, in the channel's reverent "
-            "cinematic style.\n"
+            "Return exactly one object in \"visuals\". Its \"search_query\" "
+            "must be one complete SnapGenAI visual prompt for the overall "
+            "passage, including the main scene, subject, setting, and "
+            "atmosphere. Example: 'Style: realistic. Wide view of Jesus "
+            "walking on the ocean water at night. In the distance, a small "
+            "wooden boat carrying several disciples struggles against violent "
+            "waves. Dark stormy sky, dramatic moonlight.' The object's "
+            "\"visual_direction\" should repeat the same overall shot in "
+            "one concise sentence.\n"
             + "\n\nTITLE RULES\n"
         "The title must be clear, factual, and about what this "
         "passage actually says or does. Write it in plain words.\n"
@@ -715,45 +705,20 @@ class ContentGenerator(
 
             raw_visuals = []
 
-        visuals = []
+        entry = raw_visuals[0] if raw_visuals else {}
+        if not isinstance(entry, dict):
+            entry = {}
 
-        for index, segment in enumerate(
-            segments
-        ):
-
-            entry = (
-                raw_visuals[index]
-                if index < len(raw_visuals)
-                else {}
+        query = str(entry.get("search_query", "")).strip()
+        if not query:
+            query = self._fallback_query(
+                scripture.get("text", "")
             )
 
-            if not isinstance(
-                entry,
-                dict
-            ):
-
-                entry = {}
-
-            query = str(
-                entry.get(
-                    "search_query",
-                    ""
-                )
-            ).strip()
-
-            # Every segment needs a usable query for the footage
-            # stage, so a blank one falls back to content words from
-            # the segment rather than aborting the episode.
-            if not query:
-
-                query = self._fallback_query(
-                    segment
-                )
-
-            visuals.append({
-                "search_query": query,
-                "sentence": segment,
-            })
+        visuals = [{
+            "search_query": query,
+            "sentence": spoken,
+        }]
 
         title = str(
             direction.get(

@@ -13,7 +13,7 @@ def create_video_provider(
     Factory that resolves the active stock-video provider from
     the generic configuration value:
 
-        { "video_provider": "pexels" }
+        { "video_provider": "snapgenai" }
 
     All provider-specific settings live under the provider's own
     config section (e.g. config/pexels.json). The video-generation
@@ -31,7 +31,7 @@ def create_video_provider(
     name = str(
         app_config.get(
             "video_provider",
-            "pexels"
+            "snapgenai"
         )
     ).strip().lower()
 
@@ -42,6 +42,17 @@ def create_video_provider(
         )
 
         return PexelsVideoProvider(
+            config,
+            notify=notify
+        )
+
+    if name == "snapgenai":
+
+        from production.footage.snapgenai import (
+            SnapGenAiVideoProvider
+        )
+
+        return SnapGenAiVideoProvider(
             config,
             notify=notify
         )

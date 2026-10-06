@@ -12,6 +12,44 @@
                 "min_p": 0.05,
                 "num_predict": 2048
             }
+        },
+        "video_model": {
+            "provider": "snapgenai",
+            "snapgenai": {
+                "base_url": "https://snapgen.ai/",
+                "headless": false,
+                "attach_to_existing_chrome": true,
+                "debugging_address": "127.0.0.1:9226",
+                "pause_min_seconds": 5,
+                "pause_max_seconds": 10,
+                "refresh_interval_seconds": 30,
+                "aspect_ratio_target": "9:16",
+                "aspect_ratio_button_selector": "",
+                "aspect_ratio_option_selector": "",
+                "aspect_ratio_timeout_seconds": 15,
+                "page_timeout_seconds": 60,
+                "submit_timeout_seconds": 30,
+                "login_popup_wait_seconds": 15,
+                "login_form_probe_seconds": 5,
+                "login_timeout_seconds": 120,
+                "generation_timeout_seconds": 1800,
+                "download_timeout_seconds": 300,
+                "poll_interval_seconds": 3,
+                "download_poll_interval_seconds": 2,
+                "prompt_selector": "",
+                "submit_selector": "",
+                "download_selector": "",
+                "failure_selector": "",
+                "login_email_selector": "",
+                "login_password_selector": "",
+                "login_submit_selector": "",
+                "watermark_remover": {
+                    "executable": "tools/GeminiWatermarkTool-Video.exe",
+                    "output_flag": "",
+                    "extra_args": [],
+                    "timeout_seconds": 3600
+                }
+            }
         }
     }
 }

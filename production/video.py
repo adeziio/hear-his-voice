@@ -428,12 +428,10 @@ class ProductionPipeline:
 
         query_percent = {"value": 15}
 
-        candidates_per_query = int(
-            self._provider_setting(
-                "candidates_per_query",
-                3,
-            )
-        )
+        # Hear His Voice uses one AI-generated visual clip for the whole
+        # episode. The existing composer still receives one footage group,
+        # so all narration timing and composition behavior remains unchanged.
+        candidates_per_query = 1
 
         # One sublist per visual query, in the same order as `visuals`.
         # Each sublist holds the downloaded clip paths for that query.
@@ -443,13 +441,8 @@ class ProductionPipeline:
         # tolerated.
         footage_groups = []
         total_queries = len(visuals)
-        # Track Pexels video IDs already downloaded this episode so
-        # different search queries do not produce duplicate clips. Ids
-        # alone are not enough - the same footage can be served under
-        # different Pexels pages/ids - so content hashes (SHA-256 of the
-        # downloaded bytes) are tracked alongside. Both sets are passed
-        # to every fetch call and updated in place, making uniqueness
-        # episode-wide rather than per query folder.
+        # Keep the existing provider interface arguments available for
+        # compatibility; SnapGenAI generates one clip and does not use ids.
         downloaded_ids = set()
         downloaded_hashes = set()
 
