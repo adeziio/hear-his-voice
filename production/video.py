@@ -316,15 +316,17 @@ class ProductionPipeline:
                     )
                     .get(
                         "max_words_per_line",
-                        4
+                        7
                     )
-                )
+                ),
+                narration_text=narration_text,
             )
         )
 
         word_cues = (
             build_word_cues(
-                words
+                words,
+                narration_text=narration_text,
             )
         )
 
@@ -362,7 +364,7 @@ class ProductionPipeline:
                 self.composer.compose(
                     episode_directory,
                     narration,
-                    word_cues,
+                    cues,
                     footage_groups,
                     visuals=visuals,
                     segment_count=len(

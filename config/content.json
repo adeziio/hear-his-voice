@@ -81,7 +81,7 @@
         ]
     },
     "content_generation": {
-        "words_per_second": 2.9,
+        "words_per_second": 2.8,
         "scripture_scope_note": "Episodes come only from Matthew, Mark, Luke, and John. That limit is enforced in code, not by the shape of any list. The scripture block below holds the WEBC source and the guidance examples; the passages themselves are drawn from the entire Gospel text at runtime.",
         "narration_rules": [
             "First UNDERSTAND, then tell. Before writing a single word of narration, read the whole passage and grasp its events, its meaning, its context, and how its parts relate to each other - who acts, what happens, what is taught, and why it matters. The telling comes out of that understanding, never out of rewording the sentences one by one.",

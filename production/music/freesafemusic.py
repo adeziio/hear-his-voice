@@ -23,20 +23,28 @@ TikTok and more, with no attribution and no payment required.
 """
 
 MOOD_GENRE_MAP = {
-    "curious": ["cinematic", "mysterious", "dramatic"],
-    "fascinating": ["cinematic", "mysterious", "atmospheric"],
-    "interesting": ["cinematic", "inspiring", "mysterious"],
-    "uplifting": ["uplifting", "inspiring", "upbeat"],
-    "inspiring": ["inspiring", "uplifting", "cinematic"],
-    "wonder": ["cinematic", "atmospheric", "epic"],
-    "amazing": ["cinematic", "epic", "uplifting"],
-    "mysterious": ["mysterious", "dramatic", "cinematic"],
-    "mystery": ["mysterious", "dramatic", "dark"],
-    "dramatic": ["dramatic", "epic", "cinematic"],
-    "tense": ["dramatic", "mysterious", "dark"],
-    "dark": ["dark", "dramatic", "haunting"],
-    "happy": ["happy", "uplifting", "fun"],
-    "joyful": ["happy", "uplifting", "fun"],
+    "curious": ["atmospheric", "cinematic", "piano"],
+    "fascinating": ["atmospheric", "cinematic", "mysterious"],
+    "interesting": ["atmospheric", "cinematic", "piano"],
+    "uplifting": ["cinematic", "piano", "inspiring"],
+    "inspiring": ["cinematic", "piano", "inspiring"],
+    "wonder": ["cinematic", "atmospheric", "piano"],
+    "amazing": ["cinematic", "atmospheric", "piano"],
+    "mysterious": ["mysterious", "atmospheric", "cinematic"],
+    "mystery": ["mysterious", "atmospheric", "cinematic"],
+    "dramatic": ["cinematic", "atmospheric", "dramatic"],
+    "tense": ["cinematic", "mysterious", "dramatic"],
+    "suspense": ["cinematic", "mysterious", "atmospheric"],
+    "suspenseful": ["cinematic", "mysterious", "atmospheric"],
+    "storm": ["cinematic", "atmospheric", "mysterious"],
+    "fearful": ["mysterious", "atmospheric", "cinematic"],
+    "solemn": ["piano", "classical", "cinematic"],
+    "reverent": ["ambient", "piano", "atmospheric"],
+    "contemplative": ["ambient", "piano", "peaceful"],
+    "hopeful": ["piano", "cinematic", "peaceful"],
+    "peaceful": ["peaceful", "ambient", "piano"],
+    "happy": ["piano", "peaceful", "gentle"],
+    "joyful": ["piano", "peaceful", "gentle"],
     "sad": ["sad", "emotional", "piano"],
     "melancholic": ["sad", "emotional", "piano"],
     "calm": ["calm", "peaceful", "soft"],
@@ -44,94 +52,36 @@ MOOD_GENRE_MAP = {
     "relaxing": ["relaxing", "soft", "chill"],
     "cozy": ["cozy", "warm", "gentle"],
     "warm": ["warm", "gentle", "acoustic"],
-    "hopeful": ["inspiring", "emotional", "cinematic"],
-    "playful": ["fun", "happy", "funky"],
-    "quirky": ["funky", "fun", "pop"],
-    "weird": ["funky", "fun", "mysterious"],
-    "strange": ["mysterious", "funky", "cinematic"],
-    "energetic": ["energetic", "upbeat", "groove"],
-    "exciting": ["exciting", "energetic", "adventure"],
-    "adventure": ["adventure", "epic", "cinematic"],
+    "playful": ["piano", "gentle", "peaceful"],
+    "quirky": ["piano", "gentle", "ambient"],
+    "weird": ["atmospheric", "mysterious", "ambient"],
+    "strange": ["mysterious", "atmospheric", "cinematic"],
+    "energetic": ["cinematic", "atmospheric", "piano"],
+    "exciting": ["cinematic", "atmospheric", "mysterious"],
+    "adventure": ["cinematic", "atmospheric", "piano"],
     "romantic": ["romantic", "emotional", "piano"],
     "nostalgic": ["nostalgic", "vintage", "mellow"],
     "dreamy": ["dreamy", "ambient", "atmospheric"],
-    "epic": ["epic", "cinematic", "orchestral"],
-    "smooth": ["smooth", "jazz", "lounge"],
+    "epic": ["cinematic", "atmospheric", "orchestral"],
+    "smooth": ["ambient", "piano", "mellow"],
     "gentle": ["gentle", "soft", "piano"],
     "soft": ["soft", "gentle", "ambient"],
     "chill": ["chill", "lofi", "mellow"],
-    "scary": ["dark", "haunting", "halloween"],
-    "creepy": ["dark", "haunting", "mysterious"],
-    "horror": ["haunting", "dark", "halloween"],
-    "suspense": ["mysterious", "dramatic", "dark"],
-    "funny": ["fun", "funky", "pop"],
-    "comedy": ["fun", "funky", "happy"],
-    "action": ["action", "epic", "dramatic"],
-    "beautiful": ["peaceful", "cinematic", "emotional"],
-    "mindblowing": ["cinematic", "epic", "mysterious"],
+    "scary": ["mysterious", "atmospheric", "cinematic"],
+    "creepy": ["mysterious", "atmospheric", "cinematic"],
+    "horror": ["mysterious", "atmospheric", "cinematic"],
+    "funny": ["piano", "gentle", "peaceful"],
+    "comedy": ["piano", "gentle", "peaceful"],
+    "action": ["cinematic", "atmospheric", "dramatic"],
+    "beautiful": ["peaceful", "piano", "cinematic"],
+    "mindblowing": ["cinematic", "atmospheric", "mysterious"],
 }
 
 
-# Total-random variety lives here: each energy tier lists a wide
-# pool of real site genres. Episodes draw genre pages at random
-# from their tier, so any compatible style can play - calm videos
-# roam across piano/ambient/lofi/jazz/etc, energetic ones across
-# dance/rock/party/etc. No history is kept, so back-to-back
-# repeats are allowed by design. The mid and low tiers overlap
-# heavily on purpose: the channel's default curious/wonder tone
-# should roam across both cinematic and soft beds.
+# The channel uses restrained devotional style families rather than
+# generic energy tiers. Variety is retained within each family while
+# commercial, upbeat, and aggressive styles remain unavailable.
 ENERGY_GENRE_POOL = {
-    "high": [
-        "energetic",
-        "upbeat",
-        "dance",
-        "party",
-        "hype",
-        "action",
-        "exciting",
-        "epic",
-        "powerful",
-        "rock",
-        "house",
-        "techno",
-        "funk",
-        "funky",
-        "groove",
-        "disco",
-        "pop",
-        "tribal",
-        "hip-hop",
-        "electronic",
-    ],
-    "mid": [
-        "cinematic",
-        "inspiring",
-        "uplifting",
-        "mysterious",
-        "dramatic",
-        "emotional",
-        "atmospheric",
-        "adventure",
-        "movie",
-        "retro",
-        "cool",
-        "modern",
-        "corporate",
-        "happy",
-        "fun",
-        "romantic",
-        "nostalgic",
-        "vintage",
-        "vlog",
-        "aesthetic",
-        "night",
-        "ambient",
-        "piano",
-        "calm",
-        "peaceful",
-        "chill",
-        "lofi",
-    ],
     "low": [
         "calm",
         "peaceful",
@@ -167,18 +117,42 @@ ENERGY_GENRE_POOL = {
         "guitar",
         "drone",
     ],
-    "dark": [
-        "dark",
-        "haunting",
-        "halloween",
-        "night",
+    "mid": [
+        "ambient",
+        "piano",
+        "atmospheric",
+        "cinematic",
+        "classical",
+        "emotional",
+        "inspiring",
+        "peaceful",
+        "spiritual",
+        "instrumental",
+    ],
+    "suspense": [
+        "atmospheric",
+        "cinematic",
         "mysterious",
         "dramatic",
-        "cinematic",
-        "epic",
-        "atmospheric",
+        "dark",
     ],
 }
+
+DEVOTIONAL_GENRES = frozenset(
+    """
+    ambient calm peaceful piano soft gentle soothing meditation
+    spiritual instrumental atmospheric cinematic classical slow
+    healing drone emotional inspiring mysterious dramatic dark
+    """.split()
+)
+
+UNSUITABLE_TRACK_TAGS = frozenset(
+    """
+    upbeat energetic dance party hype action exciting epic powerful
+    rock house techno funk funky groove disco pop hip-hop electronic
+    aggressive intense adrenaline fast furious battle
+    """.split()
+)
 
 # Mood words grouped by energy tier. The episode mood decides the
 # tier first; the tier then decides which wide genre pool the
@@ -206,6 +180,13 @@ DARK_ENERGY_MOODS = frozenset(
     """
     dark scary creepy horror haunted haunting eerie sinister
     dread fear terror nightmare ghost halloween
+    """.split()
+)
+
+SUSPENSE_MOODS = frozenset(
+    """
+    suspense suspenseful tense storm fearful fear danger conflict
+    uncertainty uncertain threatening perilous urgent
     """.split()
 )
 
@@ -237,6 +218,15 @@ DARK_ENERGY_KEYWORDS = frozenset(
     die dead grave dark nightmare monster demon curse poison
     fear terror mystery secret conspiracy detective shadow abyss
     deep
+    """.split()
+)
+
+SUSPENSE_KEYWORDS = frozenset(
+    """
+    storm storms danger dangerous fear fearful afraid uncertainty
+    uncertain conflict enemy enemies battle fight threatened threat
+    peril perilous waves wind sea night prison arrest betrayal
+    wilderness desert trial temptation suffering grief death
     """.split()
 )
 
@@ -567,14 +557,19 @@ class FreeSafeMusicProvider(MusicProvider):
         energy tier keeps every draw appropriate for the video.
         """
 
+        # Hear His Voice is intentionally devotional. The passage may choose
+        # either a soft devotional bed or a restrained suspense palette, but
+        # never a commercial, upbeat, or aggressive style.
         pool = []
 
-        energy_pool = list(
-            ENERGY_GENRE_POOL.get(
-                energy or "mid",
+        energy_pool = [
+            genre
+            for genre in ENERGY_GENRE_POOL.get(
+                energy or "low",
                 []
             )
-        )
+            if genre in DEVOTIONAL_GENRES
+        ]
 
         topic_genres = list(
             self._topic_genres(
@@ -587,21 +582,14 @@ class FreeSafeMusicProvider(MusicProvider):
         )
 
         for mood in mood_tags:
-
-            for genre in MOOD_GENRE_MAP.get(
-                mood,
-                []
-            ):
-
-                allowed.add(
-                    genre
-                )
+            for genre in MOOD_GENRE_MAP.get(mood, []):
+                if genre in DEVOTIONAL_GENRES:
+                    allowed.add(genre)
 
         for genre in topic_genres:
 
-            allowed.add(
-                genre
-            )
+            if genre in DEVOTIONAL_GENRES:
+                allowed.add(genre)
 
         for genre in self.genres:
 
@@ -663,7 +651,7 @@ class FreeSafeMusicProvider(MusicProvider):
 
         for genre in energy_pool:
 
-            if genre not in pool:
+            if genre in DEVOTIONAL_GENRES and genre not in pool:
 
                 pool.append(
                     genre
@@ -680,13 +668,15 @@ class FreeSafeMusicProvider(MusicProvider):
                 and genre in allowed
             ):
 
-                pool.append(
-                    genre
-                )
+                if genre in DEVOTIONAL_GENRES and genre not in pool:
+
+                    pool.append(
+                        genre
+                    )
 
         for genre in self.genres:
 
-            if genre not in pool:
+            if genre in DEVOTIONAL_GENRES and genre not in pool:
 
                 pool.append(
                     genre
@@ -694,15 +684,11 @@ class FreeSafeMusicProvider(MusicProvider):
 
         for genre in leftover_mood:
 
-            if genre not in pool:
+            if genre in DEVOTIONAL_GENRES and genre not in pool:
 
                 pool.append(
                     genre
                 )
-
-        random.shuffle(
-            pool
-        )
 
         return pool[
             :self.max_genre_pages
@@ -713,6 +699,24 @@ class FreeSafeMusicProvider(MusicProvider):
         mood_tags,
         content=None
     ):
+
+        normalized_moods = {
+            str(mood).strip().lower()
+            for mood in (mood_tags or [])
+            if str(mood).strip()
+        }
+
+        if normalized_moods.intersection(SUSPENSE_MOODS):
+            return "suspense"
+
+        words = set(
+            self._content_words(
+                content
+            )
+        )
+
+        if words.intersection(SUSPENSE_KEYWORDS):
+            return "suspense"
 
         votes = {
             "high": 0,
@@ -744,12 +748,6 @@ class FreeSafeMusicProvider(MusicProvider):
             else:
 
                 votes["mid"] += 1
-
-        words = set(
-            self._content_words(
-                content
-            )
-        )
 
         if words:
 
@@ -1051,15 +1049,46 @@ class FreeSafeMusicProvider(MusicProvider):
             for track in (tracks or [])
             if track.get("mp3_url")
             and track.get("title")
+            and not (
+                set(
+                    str(track.get("title", "")).lower().split()
+                    + [str(tag).lower() for tag in track.get("tags", [])]
+                )
+                & UNSUITABLE_TRACK_TAGS
+            )
         ]
 
         if not usable:
 
             return None
 
-        return random.choice(
-            usable
+        preferred = set(
+            self.preferred_tags
         )
+
+        if preferred:
+            scored = []
+
+            for track in usable:
+                tags = {
+                    str(tag).strip().lower()
+                    for tag in track.get("tags", [])
+                    if str(tag).strip()
+                }
+                score = len(tags.intersection(preferred))
+                scored.append((score, track))
+
+            best_score = max(
+                score
+                for score, _track in scored
+            )
+            usable = [
+                track
+                for score, track in scored
+                if score == best_score
+            ]
+
+        return random.choice(usable)
 
 
 

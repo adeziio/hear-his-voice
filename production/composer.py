@@ -31,9 +31,13 @@ class CompositionError(
 
 
 FONT_CANDIDATES = [
+    # Segoe UI Semibold is the closest standard Windows equivalent to
+    # Inter SemiBold (600) when Inter is not installed.
+    "C:/Windows/Fonts/seguisb.ttf",
+    "C:/Windows/Fonts/Inter-SemiBold.ttf",
+    "C:/Windows/Fonts/Inter_600.ttf",
     "C:/Windows/Fonts/arialbd.ttf",
     "C:/Windows/Fonts/arial.ttf",
-    "C:/Windows/Fonts/seguisb.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -597,6 +601,13 @@ class Composer:
             )
         )
 
+        highlight_color = str(
+            self.captions_config.get(
+                "highlight_color",
+                text_color
+            )
+        )
+
         stroke_color = str(
             self.captions_config.get(
                 "stroke_color",
@@ -636,11 +647,20 @@ class Composer:
         # both edges of the video.
         safe_caption_width = max(
             100,
-            int(width * 0.92)
+            int(width * 0.82)
             - 2 * stroke_width
         )
 
         caption_clips = []
+
+        fixed_font_size = font_size
+        caption_padding = stroke_width + 24
+        safe_text_width = max(
+            100,
+            safe_caption_width
+            - 2 * caption_padding
+            - 4
+        )
 
         for cue in cues:
 
@@ -667,91 +687,193 @@ class Composer:
 
                 continue
 
-            # Wrap (and if necessary shrink) this cue so it always
-            # fits the frame horizontally. Word-level wrapping only -
-            # a word is never broken in half.
-            text, font_size = (
+            # Keep one consistent font size throughout the video. Long
+            # sentences wrap onto additional lines; they do not shrink on a
+            # cue-by-cue basis.
+            text, _ = (
                 self._wrap_caption_text(
                     text,
                     font_path,
-                    font_size,
+                    fixed_font_size,
                     stroke_width,
-                    safe_caption_width
+                    safe_text_width,
+                    allow_font_resize=False,
                 )
             )
 
-            # Load the font at the size the wrap step settled on.
             try:
                 if font_path:
-                    font_pil = ImageFont.truetype(font_path, font_size)
+                    font_pil = ImageFont.truetype(font_path, fixed_font_size)
                 else:
                     font_pil = ImageFont.load_default()
             except Exception:
                 font_pil = ImageFont.load_default()
 
-            # Calculate text size with padding for stroke and descenders
-            temp_img = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-            temp_draw = ImageDraw.Draw(temp_img)
-            
-            # Get text bounding box
-            bbox = temp_draw.textbbox((0, 0), text, font=font_pil)
-            text_w = bbox[2] - bbox[0]
-            text_h = bbox[3] - bbox[1]
-            
-            # Add padding for stroke width and extra space for descenders
-            padding = stroke_width + 10
-            img_w = text_w + 2 * padding + 4
-            img_h = text_h + 2 * padding + 4
+            caption_words = cue.get("words", [])
+            states = caption_words or [{
+                "start": cue_start,
+                "end": cue_end,
+            }]
 
-            # Create transparent image for the caption
-            img = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
+            for word_index, word in enumerate(states):
+                state_start = max(
+                    cue_start,
+                    float(word.get("start", cue_start))
+                )
+                state_end = cue_end
 
-            # Position text with offset to account for bbox origin
-            x = padding - bbox[0]
-            y = padding - bbox[1]
+                if word_index + 1 < len(states):
+                    state_end = min(
+                        cue_end,
+                        float(states[word_index + 1].get("start", cue_end))
+                    )
 
-            # Draw stroke by drawing text at offsets
-            if stroke_width > 0:
-                for dx in range(-stroke_width, stroke_width + 1):
-                    for dy in range(-stroke_width, stroke_width + 1):
-                        if dx != 0 or dy != 0:
-                            draw.text(
-                                (x + dx, y + dy),
-                                text,
-                                font=font_pil,
-                                fill=(0, 0, 0, 255)
-                            )
+                if state_end <= state_start:
+                    continue
 
-            # Draw main text
-            draw.text(
-                (x, y),
-                text,
-                font=font_pil,
-                fill=(255, 255, 255, 255)
-            )
+                img = self._make_caption_image(
+                    text,
+                    font_pil,
+                    text_color,
+                    highlight_color,
+                    stroke_color,
+                    stroke_width,
+                    word_index if caption_words else None,
+                    caption_words,
+                )
+                clip = ImageClip(np.array(img))
 
-            # Convert to numpy array and create ImageClip
-            img_array = np.array(img)
-            clip = ImageClip(img_array)
-
-            caption_clips.append(
-                clip
-                .with_position(
-                    (
-                        "center",
-                        origin_y
+                caption_clips.append(
+                    clip
+                    .with_position(
+                        (
+                            "center",
+                            origin_y
+                        )
+                    )
+                    .with_start(
+                        state_start
+                    )
+                    .with_end(
+                        state_end
                     )
                 )
-                .with_start(
-                    cue_start
-                )
-                .with_end(
-                    cue_end
-                )
-            )
 
         return caption_clips
+
+    def _make_caption_image(
+        self,
+        text,
+        font_pil,
+        text_color,
+        highlight_color,
+        stroke_color,
+        stroke_width,
+        highlighted_index,
+        caption_words,
+    ):
+        lines = str(text).split("\n")
+        line_words = []
+        word_index = 0
+
+        for line in lines:
+            words = line.split()
+            line_words.append(words)
+            word_index += len(words)
+
+        draw_image = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        measure = ImageDraw.Draw(draw_image)
+        line_sizes = [
+            measure.textbbox(
+                (0, 0),
+                line,
+                font=font_pil,
+                stroke_width=stroke_width,
+            )
+            for line in lines
+        ]
+
+        # Highlighted words are drawn separately, which applies the stroke
+        # around every word. Measuring the complete line with one stroke
+        # underestimates that width and can clip the last word. Use the exact
+        # same word-by-word measurement as the drawing loop instead.
+        line_widths = [
+            self._caption_line_width(
+                words,
+                font_pil,
+                measure,
+                stroke_width,
+            )
+            for words in line_words
+        ]
+        line_heights = [bbox[3] - bbox[1] for bbox in line_sizes]
+        # Use one shared line box for the whole caption. Per-line glyph
+        # bounds can differ because of ascenders and descenders; advancing
+        # by each individual height makes the gaps vary in multi-line cues.
+        # The tallest line defines a consistent vertical advance for every
+        # line while preserving the current font and styling.
+        line_height = max(line_heights or [0])
+        # Keep a generous transparent margin around the word-by-word
+        # rendering. This is intentionally larger than the outline itself so
+        # the centered ImageClip can never place a final word against the
+        # frame edge after highlighting is applied.
+        padding = stroke_width + 24
+        line_gap = max(4, int(font_pil.size * 0.12))
+        img_w = max(line_widths or [0]) + 2 * padding + 4
+        img_h = line_height * len(lines) + line_gap * max(0, len(lines) - 1) + 2 * padding + 4
+        image = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        y = padding
+        current_index = 0
+
+        for line, bbox, line_width, _line_height, words in zip(
+            lines,
+            line_sizes,
+            line_widths,
+            line_heights,
+            line_words,
+        ):
+            x = (img_w - line_width) / 2 - bbox[0]
+            cursor_x = x
+
+            for index, word in enumerate(words):
+                color = (
+                    highlight_color
+                    if highlighted_index == current_index + index
+                    else text_color
+                )
+                word_bbox = draw.textbbox(
+                    (0, 0),
+                    word,
+                    font=font_pil,
+                    stroke_width=stroke_width,
+                )
+                word_width = word_bbox[2] - word_bbox[0]
+                draw_position = (cursor_x, y - bbox[1])
+
+                if stroke_width > 0:
+                    for dx in range(-stroke_width, stroke_width + 1):
+                        for dy in range(-stroke_width, stroke_width + 1):
+                            if dx != 0 or dy != 0:
+                                draw.text(
+                                    (draw_position[0] + dx, draw_position[1] + dy),
+                                    word,
+                                    font=font_pil,
+                                    fill=stroke_color,
+                                )
+
+                draw.text(
+                    draw_position,
+                    word,
+                    font=font_pil,
+                    fill=color,
+                )
+                cursor_x += word_width + measure.textlength(" ", font=font_pil)
+
+            y += line_height + line_gap
+            current_index += len(words)
+
+        return image
 
     def _make_caption_text_clip(
         self,
@@ -868,7 +990,8 @@ class Composer:
         font_path,
         font_size,
         stroke_width,
-        max_width
+        max_width,
+        allow_font_resize=True,
     ):
 
         """
@@ -915,17 +1038,12 @@ class Composer:
             value,
             font_pil
         ):
-
-            left, top, right, bottom = (
-                draw.textbbox(
-                    (0, 0),
-                    value,
-                    font=font_pil,
-                    stroke_width=stroke_width
-                )
+            return self._caption_line_width(
+                str(value).split(),
+                font_pil,
+                draw,
+                stroke_width,
             )
-
-            return right - left
 
         font_pil = make_font(
             font_size
@@ -942,6 +1060,8 @@ class Composer:
         )
 
         while (
+            allow_font_resize
+            and
             effective_size > 20
             and text_width(
                 longest_word,
@@ -998,6 +1118,36 @@ class Composer:
                 lines
             ),
             effective_size
+        )
+
+    @staticmethod
+    def _caption_line_width(
+        words,
+        font_pil,
+        measure,
+        stroke_width,
+    ):
+
+        """Measure captions exactly as the highlighted renderer draws them."""
+
+        if not words:
+            return 0
+
+        word_width = 0
+
+        for word in words:
+            bbox = measure.textbbox(
+                (0, 0),
+                word,
+                font=font_pil,
+                stroke_width=stroke_width,
+            )
+            word_width += bbox[2] - bbox[0]
+
+        return int(
+            word_width
+            + max(0, len(words) - 1)
+            * measure.textlength(" ", font=font_pil)
         )
 
     def _resolve_font(

@@ -30,10 +30,10 @@
         "max_words_per_line": 7,
         "highlight_color": "yellow",
         "font": "",
-        "font_size": 48,
+        "font_size": 45,
         "text_color": "white",
         "stroke_color": "black",
-        "stroke_width": 4,
-        "vertical_position": 0.70
+        "stroke_width": 2,
+        "vertical_position": 0.625
     }
 }

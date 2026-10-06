@@ -616,8 +616,13 @@ class ContentGenerator(
             "- \"summary\": one short factual sentence, following the "
             "SUMMARY RULES above. No reference, no interpretation.\n"
             "- \"mood\": 1-3 lowercase English words for the emotional "
-            "tone, used to choose the background music (for example "
-            "reverent, hopeful, solemn, gentle, uplifting, tender).\n"
+            "tone, used to choose the background music. Choose the style "
+            "from the passage: reverent, contemplative, peaceful, solemn, "
+            "hopeful, gentle, uplifting, or tender for reflective passages; "
+            "suspenseful, tense, storm, fearful, or uncertain when the "
+            "passage involves danger, storms, fear, conflict, or uncertainty. "
+            "Suspense must remain soft and atmospheric, never upbeat or "
+            "aggressive.\n"
         )
 
     def parse_direction(

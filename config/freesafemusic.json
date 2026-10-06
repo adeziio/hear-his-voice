@@ -6,12 +6,17 @@
 
     "genres": [
         "ambient",
-        "cinematic",
-        "inspiring",
         "calm",
+        "peaceful",
         "piano",
-        "mysterious",
-        "upbeat"
+        "soft",
+        "gentle",
+        "soothing",
+        "meditation",
+        "spiritual",
+        "instrumental",
+        "atmospheric",
+        "cinematic"
     ],
 
     "preferred_tags": [
@@ -27,11 +32,15 @@
         "soft",
         "gentle",
         "atmospheric",
-        "inspiring",
-        "uplifting",
+        "reverent",
+        "devotional",
+        "meditative",
+        "spiritual",
+        "contemplative",
         "emotional",
         "dreamy",
-        "chill"
+        "mysterious",
+        "dramatic"
     ],
 
     "max_genre_pages": 4,
