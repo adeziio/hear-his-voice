@@ -1,43 +1,7 @@
-import copy
-import importlib
-import sys
 from pathlib import Path
 
+from ai.providers.snapgenai_provider import SnapGenAiProvider
 from production.footage.base import VideoProvider, VideoProviderError
-
-
-MONKI_LABS_ROOT = (
-    Path(__file__).resolve().parents[3]
-    / "monki-labs"
-)
-
-
-def _load_monki_provider():
-    """Load the existing Monki Labs provider without copying its logic."""
-    saved_modules = {
-        name: module
-        for name, module in sys.modules.items()
-        if name == "ai" or name.startswith("ai.")
-    }
-
-    for name in list(saved_modules):
-        sys.modules.pop(name, None)
-
-    original_path = list(sys.path)
-    sys.path.insert(0, str(MONKI_LABS_ROOT))
-
-    try:
-        return importlib.import_module(
-            "ai.providers.snapgenai_provider"
-        ).SnapGenAiProvider
-    finally:
-        sys.path[:] = original_path
-
-        for name in list(sys.modules):
-            if name == "ai" or name.startswith("ai."):
-                sys.modules.pop(name, None)
-
-        sys.modules.update(saved_modules)
 
 
 class SnapGenAiVideoProvider(VideoProvider):
@@ -45,27 +9,8 @@ class SnapGenAiVideoProvider(VideoProvider):
 
     def __init__(self, config, notify=None):
         super().__init__(config, notify=notify)
-        self.config = copy.deepcopy(config)
-        video_model = (
-            self.config
-            .setdefault("ai_models", {})
-            .setdefault("models", {})
-            .setdefault("video_model", {})
-        )
-        settings = video_model.setdefault("snapgenai", {})
-        settings["profile_directory"] = str(
-            MONKI_LABS_ROOT / "media" / "browser_profile" / "snapgenai"
-        )
-        settings["download_directory"] = str(
-            MONKI_LABS_ROOT / "media" / "downloads" / "snapgenai"
-        )
-        remover = settings.setdefault("watermark_remover", {})
-        remover["executable"] = str(
-            MONKI_LABS_ROOT / "tools" / "GeminiWatermarkTool-Video.exe"
-        )
-        provider_class = _load_monki_provider()
-        self.provider = provider_class(
-            self.config,
+        self.provider = SnapGenAiProvider(
+            config,
             progress_callback=self.notify,
         )
 
@@ -106,4 +51,28 @@ class SnapGenAiVideoProvider(VideoProvider):
                 f"SnapGenAI generation failed: {error}"
             ) from error
 
-        return [str(generated)]
+        generated_path = Path(generated)
+
+        if (
+            generated_path.resolve()
+            != output_path.resolve()
+        ):
+            raise VideoProviderError(
+                "SnapGenAI returned an unexpected output path: "
+                f"{generated_path}"
+            )
+
+        if (
+            not generated_path.is_file()
+            or generated_path.stat().st_size <= 0
+        ):
+            raise VideoProviderError(
+                "SnapGenAI returned a missing or empty visual clip: "
+                f"{generated_path.name}"
+            )
+
+        self.notify(
+            "SnapGenAI visual clip downloaded and processed successfully."
+        )
+
+        return [str(generated_path)]

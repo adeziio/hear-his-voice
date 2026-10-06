@@ -25,6 +25,7 @@ REQUIRED_PACKAGES = (
     ("selenium", "selenium"),
     ("edge_tts", "edge-tts"),
     ("moviepy", "moviepy"),
+    ("av", "av"),
     ("imageio_ffmpeg", "imageio-ffmpeg"),
     ("numpy", "numpy"),
     ("PIL", "Pillow"),

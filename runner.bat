@@ -214,7 +214,7 @@ if not errorlevel 1 (
     goto :after_chrome
 )
 
-start "Hear His Voice - SnapGenAI Chrome" "%CHROME_EXE%" --remote-debugging-address=%SNAPGENAI_DEBUG_HOST% --remote-debugging-port=%SNAPGENAI_DEBUG_PORT% --user-data-dir="%SNAPGENAI_CHROME_PROFILE%" "https://snapgen.ai/"
+start "Hear His Voice - SnapGenAI Chrome" "%CHROME_EXE%" --remote-debugging-address=%SNAPGENAI_DEBUG_HOST% --remote-debugging-port=%SNAPGENAI_DEBUG_PORT% --user-data-dir="%SNAPGENAI_CHROME_PROFILE%" --start-maximized "https://snapgen.ai/"
 
 echo SnapGenAI Chrome launched.
 echo.

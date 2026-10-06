@@ -32,6 +32,7 @@ edge-tts
 # ==================================
 
 moviepy
+av
 imageio
 imageio-ffmpeg
 numpy
