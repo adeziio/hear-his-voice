@@ -745,7 +745,7 @@ class ProductionPipeline:
 
         value = (
             self.config.get(
-                "pexels",
+                "snapgenai",
                 {}
             )
             .get(

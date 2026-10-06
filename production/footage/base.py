@@ -6,7 +6,7 @@ class VideoProviderError(
 ):
 
     """
-    Raised for any stock-footage provider failure. The message is
+    Raised for any video provider failure. The message is
     always safe to surface directly in job state.
     """
 
@@ -16,12 +16,12 @@ class VideoProviderError(
 class VideoProvider:
 
     """
-    Base class for stock-video providers.
+    Base class for video providers.
 
-    A provider searches a stock footage source for a query and
-    downloads candidate video files into a local directory:
+    A provider turns a visual prompt into video files in a local
+    directory:
 
-        search(query)       -> candidate videos
+        generate(query)     -> candidate videos
         download(candidate) -> local footage
 
     Implementations must keep all provider-specific behavior

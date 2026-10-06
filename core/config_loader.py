@@ -89,22 +89,6 @@ class ConfigLoader:
 
         }
 
-        # Provider configs are optional - a provider that is not
-        # installed/selected does not need a config file, but one
-        # exists for every provider the project ships with.
-
-        pexels = (
-            self.load_optional(
-                "pexels.json"
-            )
-        )
-
-        if pexels is not None:
-
-            config["pexels"] = (
-                pexels
-            )
-
         freesafemusic = (
             self.load_optional(
                 "freesafemusic.json"

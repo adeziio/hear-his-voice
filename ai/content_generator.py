@@ -814,9 +814,9 @@ class ContentGenerator(
         segment
     ):
         """
-        A last-resort search query for a segment the AI left blank.
-        Pexels matches on concrete nouns, so the longest content words
-        in the segment are used.
+        A last-resort visual prompt for a segment the AI left blank.
+        SnapGenAI produces better results from concrete subjects, so the
+        longest content words in the segment are used.
         """
         stop_words = {
             "the", "a", "an", "and", "or", "but", "is",

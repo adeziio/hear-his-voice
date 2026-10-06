@@ -3,7 +3,7 @@
 Hear His Voice is an automated short-form video studio that lets Scripture
 speak for itself. Each episode takes one passage of the **World English Bible
 Catholic (WEBC)**, tells it as original, engaging narration held faithful to
-the passage, and builds a vertical film around it: stock footage, narration,
+passage, and builds a vertical film around it: a generated visual clip, narration,
 synchronized captions, and background music.
 
 ---
@@ -17,7 +17,7 @@ Told as original narration  ← checked against the passage
         ↓
 AI creative direction (title, mood, per-segment visual queries)
         ↓
-Pexels footage → narration (TTS) → synchronized captions → music
+SnapGenAI visual clip → narration (TTS) → synchronized captions → music
         ↓
 Final vertical MP4
         ↓
@@ -102,7 +102,7 @@ field for Scripture text**:
 | `title` | Episode title |
 | `summary` | Episode-listing description |
 | `mood` | 1–3 words used to select background music |
-| `visuals[].search_query` | A practical Pexels search phrase per segment |
+| `visuals[].search_query` | A SnapGenAI visual prompt for the episode or segment |
 | `visuals[].visual_direction` | One sentence describing the shot |
 
 The spoken segments are produced **deterministically** by
@@ -131,7 +131,7 @@ Curious About Things project. The `production/` package is shared:
 | Segmentation | `scripture/segmenter.py` | Sentence splitting into spoken segments |
 | The telling | `ai/content_generator.py` | Passage retold as narration, checked against it |
 | Creative direction | `ai/content_generator.py` | AI returns visual direction, title, summary, mood |
-| Footage | `production/footage/pexels.py` | Search, download, de-duplicate, segment matching |
+| Video | `production/footage/snapgenai.py` | Generate and download the episode visual clip |
 | Narration | `production/narration.py` | edge-tts + word-level timings |
 | Captions | `production/captions.py` | Phrase-based cues + SRT |
 | Music | `production/music/freesafemusic.py` | Licensed for commercial use |
@@ -183,8 +183,7 @@ The project is **configuration-driven**.
 |---|---|
 | `config/app.json` | **Target duration**, resolution, fps, narration voice, music volume, caption styling |
 | `config/content.json` | Channel voice, narration rules, visual rules, creative direction, **and all Scripture settings** — translation, source URL, licence, narration word rate, and the rotation references |
-| `config/ai_models.json` | Ollama model and sampling options |
-| `config/pexels.json` | Footage provider settings, with format-specific ones under `shorts` |
+| `config/ai_models.json` | SnapGenAI video-generation settings and Ollama model options |
 | `config/freesafemusic.json` | Music provider settings |
 
 **One number drives the length.** `app.json` → `shorts.target_duration_seconds`
@@ -200,21 +199,6 @@ words_per_segment = word_target ÷ segments_per_episode
 visuals — per episode, set to `14` to match the other project's 14 narration
 sentences and 14 visuals. Segment *size* is derived, so changing `50` to `150`
 gives each visual three times the room without touching anything else.
-
-## 📐 Format sections
-
-Settings that only make sense for one kind of output live under that format's own
-parent, so a second format can ask for a different shape without shadowing the
-first. `app.json` already had one for `shorts`; `pexels.json` now has the same
-shape for the settings that shape the footage search:
-
-```json
-"shorts": { "orientation": "vertical", "resolution_name": "4K" }
-```
-
-Everything above that in `pexels.json` — timeouts, pauses, and the filter
-recovery settings — applies to the provider whatever the format. A `videos`
-section can be added later with no code change.
 
 How far a passage can actually reach is bounded by the size of its window in
 `content.json` → `scripture.references` — a window is what the passage is allowed
@@ -306,8 +290,8 @@ python tests/live_video_test.py     # real WEBC + real TTS + real render
 through the real model, asserted for fidelity (no dropped name, no commentary,
 no spoken reference) and for originality (not the passage copied back).
 
-`live_video_test.py` stubs only the Pexels download (which needs an interactive
-browser); narration, captions, timing, music, composition and rendering are all
+`live_video_test.py` stubs the SnapGenAI generation (which needs an interactive
+browser session); it does not try to generate a real clip.
 the real code running on the real passage.
 
 ---

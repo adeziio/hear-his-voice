@@ -103,7 +103,7 @@ def build_visual_segments(
 ):
     """
     Breaks the narration into the spoken segments that each get their
-    own Pexels query and visual direction.
+    own SnapGenAI visual prompt and visual direction.
 
     The text is only ever cut at punctuation that is already in it.
     Joining the result with single spaces reproduces the input exactly,
