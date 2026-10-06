@@ -1,7 +1,10 @@
 import json
 import random
+import re
 
 from pathlib import Path
+
+from ai.providers.ollama_provider import OllamaProvider
 
 
 from scripture.webc import (
@@ -52,6 +55,27 @@ ROTATION_ORDER = (
 # The progress file format. Version 1 stored a flat list of used
 # reference strings, which cannot express a position inside a book.
 STATE_VERSION = 2
+
+
+# The model only sees a small number of consecutive ending choices around
+# the soft duration target. This keeps selection sequential and bounded while
+# allowing a story or teaching to finish naturally instead of stopping at an
+# arbitrary word count.
+NATURAL_ENDING_EXTRA_VERSES = 4
+NATURAL_ENDING_MAX_CANDIDATES = 8
+
+
+NATURAL_ENDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ending_index": {
+            "type": "integer"
+        }
+    },
+    "required": [
+        "ending_index"
+    ]
+}
 
 
 def book_verses(scripture, book):
@@ -331,6 +355,10 @@ class PassageSelector:
             )
         )
 
+        # The natural-ending model is created lazily so selector construction
+        # remains usable for deterministic tooling and offline fallbacks.
+        self.llm = None
+
         self.scripture = WEBCScripture(
             cache_directory
         ) if cache_directory else WEBCScripture()
@@ -425,10 +453,15 @@ class PassageSelector:
                 f"{book} {chapter}:{verse} is past the end of the book."
             )
 
-        count = fit_passage_to_duration(
+        target_count = fit_passage_to_duration(
             available,
             self.target_seconds,
             self.words_per_second,
+        )
+
+        count = self._choose_natural_ending(
+            available,
+            target_count,
         )
 
         chosen = available[:max(1, int(count))]
@@ -456,6 +489,151 @@ class PassageSelector:
                 1,
             ),
         }, last
+
+    def _natural_ending_candidates(self, available, target_count):
+        """
+        Returns a bounded set of leading consecutive verse choices.
+
+        The first choice is the short-side duration boundary when there is
+        one; the remaining choices extend beyond the target so the model can
+        finish a complete thought without being offered an unbounded window.
+        """
+        target_count = max(
+            1,
+            min(
+                int(target_count),
+                len(available),
+            )
+        )
+
+        first_count = max(
+            1,
+            target_count - 2,
+        )
+
+        last_count = min(
+            len(available),
+            target_count + NATURAL_ENDING_EXTRA_VERSES,
+        )
+
+        counts = list(
+            range(
+                first_count,
+                last_count + 1,
+            )
+        )
+
+        if len(counts) > NATURAL_ENDING_MAX_CANDIDATES:
+
+            counts = counts[:NATURAL_ENDING_MAX_CANDIDATES]
+
+        return [
+            {
+                "count": count,
+                "verses": available[:count],
+            }
+            for count in counts
+        ]
+
+    @staticmethod
+    def _candidate_text(candidate):
+        return " ".join(
+            f"{item['chapter']}:{item['verse']} {item['text']}"
+            for item in candidate["verses"]
+        )
+
+    def _choose_natural_ending(self, available, target_count):
+        """
+        Uses simple LLM judgment to choose a natural ending from consecutive
+        verse boundaries, with the duration target treated only as a guide.
+
+        Any unavailable or unusable model response falls back to the existing
+        whole-verse duration choice. No verse can be skipped because every
+        candidate starts at the first available verse and ends at a prefix of
+        that same ordered list.
+        """
+        candidates = self._natural_ending_candidates(
+            available,
+            target_count,
+        )
+
+        if len(candidates) <= 1:
+
+            return candidates[0]["count"] if candidates else 1
+
+        candidate_lines = "\n\n".join(
+            f"OPTION {index}: ends after "
+            f"{candidate['verses'][-1]['chapter']}:{candidate['verses'][-1]['verse']}\n"
+            f"{self._candidate_text(candidate)}"
+            for index, candidate in enumerate(
+                candidates,
+                start=1,
+            )
+        )
+
+        prompt = (
+            "You choose the ending of a sequential Gospel passage for a "
+            "short-form episode. The passage MUST begin with the first "
+            "unread verse shown and MUST use consecutive verses only.\n\n"
+            "The target duration is a soft guide, not a hard limit. Prefer "
+            "the option that forms a coherent, intentional interval with a "
+            "natural beginning and a finished ending. End after a natural "
+            "narrative, teaching, parable, miracle, or complete thought. "
+            "Do not stop in the middle of an event, saying, explanation, or "
+            "idea merely to match the target. A few extra verses are better "
+            "when they complete the passage; a shorter option is better when "
+            "it already reaches a satisfying conclusion.\n\n"
+            f"Soft target: about {self.target_seconds:g} seconds at "
+            f"{self.words_per_second:g} words per second.\n"
+            "Choose exactly one option. Return only JSON with the 1-based "
+            "option number in `ending_index`.\n\n"
+            + candidate_lines
+        )
+
+        try:
+
+            if self.llm is None:
+
+                self.llm = OllamaProvider(
+                    self.config
+                )
+
+            response = self.llm.generate(
+                prompt,
+                response_format=NATURAL_ENDING_SCHEMA,
+            )
+
+            if isinstance(response, dict):
+
+                data = response
+
+            else:
+
+                match = re.search(
+                    r"\{.*\}",
+                    str(response or ""),
+                    re.DOTALL,
+                )
+
+                if match is None:
+
+                    return target_count
+
+                data = json.loads(match.group(0))
+
+            option_number = int(
+                data.get("ending_index", 0)
+            )
+
+            if not 1 <= option_number <= len(candidates):
+
+                return target_count
+
+            return candidates[option_number - 1]["count"]
+
+        except Exception:
+
+            return target_count
 
     def _size_passage(self, reference):
         """
