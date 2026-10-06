@@ -199,6 +199,10 @@ def test_the_prompt_asks_for_original_storytelling(
 
     assert "not to quote it back" in prompt
 
+    assert "faithful to the source's facts, events, sequence, and meaning" in prompt
+
+    assert "Do not assume what any character knew, felt, believed, or intended" in prompt
+
 
 def test_the_configured_rules_forbid_invention_and_keep_every_fact():
     rules = " ".join(
@@ -218,6 +222,8 @@ def test_the_configured_rules_forbid_invention_and_keep_every_fact():
     assert "No preface, no commentary" in rules
 
     assert "Never mention chapters, verses" in rules
+
+    assert "unsupported thoughts, motivations, explanations, backstory" in rules
 
 
 # --------------------------------------------------------------------------

@@ -191,6 +191,26 @@ def test_the_search_query_field_is_told_to_support_the_meaning():
     assert "theme, setting, era or mood" in prompt
 
 
+def test_the_rules_prefer_concrete_cinematic_search_phrases():
+    rules = " ".join(_visual_rules())
+
+    assert "concrete, searchable ideas" in rules
+
+    assert "stormy lake night" in rules
+
+    assert "theological claims" in rules
+
+
+def test_the_rules_replace_awkward_literal_scenes_with_filmable_context():
+    rules = " ".join(_visual_rules())
+
+    assert "awkward literal translations" in rules
+
+    assert "ancient cushion on wooden bench" in rules
+
+    assert "filmable setting" in rules
+
+
 # --------------------------------------------------------------------------
 # Everything out of scope stays out of scope
 # --------------------------------------------------------------------------
