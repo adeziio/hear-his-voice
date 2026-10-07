@@ -1467,7 +1467,7 @@ class SnapGenAiProvider:
 
             pass
 
-    def _aspect_ratio_selectors(
+    def _button_selectors(
         self,
         label
     ):
@@ -1497,117 +1497,79 @@ class SnapGenAiProvider:
                 "//*[@role='button'][contains(translate("
                 f"normalize-space(.), '{upper}', "
                 f"'{lower}'), '{needle}')]"
-            )
+            ),
+            # The generation page groups its aspect ratio,
+            # duration and resolution choices as <label> rows
+            # inside a fieldset, so plain text matching has to
+            # consider labels as clickable controls too.
+            text_xpath("label"),
         ]
 
-    def _aspect_ratio_option_selectors(
+    def _select_page_option(
         self,
-        label
+        driver,
+        label,
+        target,
+        button_setting,
+        timeout_setting,
+        default_timeout
     ):
 
-        # Dropdown options are usually menu items or option rows
-        # rather than plain buttons, so prefer the common ARIA
-        # roles before falling back to generic elements whose
-        # visible text contains the label.
-
-        upper = XPATH_UPPER
-
-        lower = XPATH_LOWER
-
-        needle = str(
-            label
-        ).strip().lower()
-
-        def text_xpath(
-            tag
-        ):
-
-            return (
-                f"//{tag}[contains(translate("
-                f"normalize-space(.), '{upper}', "
-                f"'{lower}'), '{needle}')]"
-            )
-
-        return [
-            text_xpath("*[@role='option']"),
-            text_xpath("*[@role='menuitem']"),
-            text_xpath("*[@role='menuitemradio']"),
-            text_xpath("li"),
-            text_xpath("button"),
-            text_xpath("a"),
-            text_xpath("div"),
-            text_xpath("span")
-        ]
-
-    def _select_aspect_ratio(
-        self,
-        driver
-    ):
-
-        # The generation page lets you pick the output aspect ratio.
-        # The trigger starts at "16:9". Clicking it opens a dropdown
-        # menu instead of toggling, so the target option (default
-        # "9:16") is then selected from that menu. This is a normal
-        # UI interaction, not any bypass technique.
+        # The generation page exposes aspect ratio, duration and
+        # resolution as direct buttons: clicking the control whose
+        # text matches the target value selects it, so no dropdown
+        # option step is needed anymore. An explicit button
+        # selector override is honored first; otherwise the
+        # visible button whose text matches the target is used.
+        # This is a normal UI interaction, not any bypass
+        # technique.
 
         target = str(
-            self._setting(
-                "aspect_ratio_target",
-                "9:16"
-            )
-        ).strip() or "9:16"
+            target
+        ).strip()
 
-        source_label = "16:9"
-
-        if self._find_visible(
-            driver,
-            self._aspect_ratio_selectors(
-                target
-            )
-        ) is not None:
-
-            self._notify(
-                f"Aspect ratio is already "
-                f"{target}."
-            )
+        if not target:
 
             return
 
-        source_selector = str(
+        button_selector = str(
             self._setting(
-                "aspect_ratio_button_selector",
+                button_setting,
                 ""
             )
         ).strip()
 
         element = None
 
-        if source_selector:
+        if button_selector:
 
             element = self._find_visible(
                 driver,
-                [source_selector]
+                [button_selector]
             )
 
         if element is None:
 
             element = self._find_visible(
                 driver,
-                self._aspect_ratio_selectors(
-                    source_label
+                self._button_selectors(
+                    target
                 )
             )
 
         if element is None:
 
             raise SnapGenAiError(
-                "Could not find the aspect ratio "
-                f"button ({source_label}) on the "
-                "generation page."
+                f"Could not find the {label} "
+                f"button ({target}) on the "
+                "generation page. "
+                f"Set {button_setting} in "
+                "config/ai_models.json if the "
+                "page uses a different control."
             )
 
         self._notify(
-            f"Selecting {target} aspect ratio..."
+            f"Selecting {target} {label}..."
         )
 
         self._safe_click(
@@ -1617,76 +1579,29 @@ class SnapGenAiProvider:
 
         self._human_pause()
 
-        # The click opens a dropdown - pick the target entry from
-        # it. An explicit selector override is honored first.
-
-        option_selector = str(
-            self._setting(
-                "aspect_ratio_option_selector",
-                ""
-            )
-        ).strip()
-
-        option = None
-
-        if option_selector:
-
-            option = self._find_visible(
-                driver,
-                [option_selector]
-            )
-
-        if option is None:
-
-            option = self._find_visible(
-                driver,
-                self._aspect_ratio_option_selectors(
-                    target
-                )
-            )
-
-        if option is None:
-
-            raise SnapGenAiError(
-                "Could not find the aspect ratio "
-                f"option ({target}) in the dropdown. "
-                "Set aspect_ratio_option_selector in "
-                "config/ai_models.json if the page "
-                "uses a different control."
-            )
-
-        self._notify(
-            f"Choosing {target} from the "
-            "aspect ratio dropdown."
-        )
-
-        self._safe_click(
-            driver,
-            option
-        )
-
         try:
 
             deadline = time.monotonic() + self._seconds(
-                "aspect_ratio_timeout_seconds",
-                15
+                timeout_setting,
+                default_timeout
             )
 
         except TypeError:
 
-            deadline = time.monotonic() + 15
+            deadline = time.monotonic() + default_timeout
 
         while time.monotonic() < deadline:
 
             if self._find_visible(
                 driver,
-                self._aspect_ratio_selectors(
+                self._button_selectors(
                     target
                 )
             ) is not None:
 
                 self._notify(
-                    f"Aspect ratio set to {target}."
+                    f"{label.capitalize()} set to "
+                    f"{target}."
                 )
 
                 return
@@ -1694,9 +1609,94 @@ class SnapGenAiProvider:
             time.sleep(0.5)
 
         raise SnapGenAiError(
-            "The aspect ratio selection was not "
+            f"The {label} selection was not "
             f"confirmed as {target} within "
-            "aspect_ratio_timeout_seconds."
+            f"{timeout_setting}."
+        )
+
+    def _select_aspect_ratio(
+        self,
+        driver
+    ):
+
+        # The generation page lets you pick the output aspect
+        # ratio with a single button click. This is a normal UI
+        # interaction, not any bypass technique.
+
+        target = str(
+            self._setting(
+                "aspect_ratio_target",
+                "9:16"
+            )
+        ).strip() or "9:16"
+
+        self._select_page_option(
+            driver,
+            "aspect ratio",
+            target,
+            "aspect_ratio_button_selector",
+            "aspect_ratio_timeout_seconds",
+            15
+        )
+
+    def _select_duration(
+        self,
+        driver
+    ):
+
+        target = str(
+            self._setting(
+                "duration_target",
+                ""
+            )
+        ).strip()
+
+        if not target:
+
+            self._notify(
+                "No duration_target configured - "
+                "skipping duration selection."
+            )
+
+            return
+
+        self._select_page_option(
+            driver,
+            "duration",
+            target,
+            "duration_button_selector",
+            "duration_timeout_seconds",
+            15
+        )
+
+    def _select_resolution(
+        self,
+        driver
+    ):
+
+        target = str(
+            self._setting(
+                "resolution_target",
+                ""
+            )
+        ).strip()
+
+        if not target:
+
+            self._notify(
+                "No resolution_target configured - "
+                "skipping resolution selection."
+            )
+
+            return
+
+        self._select_page_option(
+            driver,
+            "resolution",
+            target,
+            "resolution_button_selector",
+            "resolution_timeout_seconds",
+            15
         )
 
     def _open_generation_page(
@@ -2588,6 +2588,18 @@ class SnapGenAiProvider:
             self._human_pause()
 
             self._select_aspect_ratio(
+                driver
+            )
+
+            self._human_pause()
+
+            self._select_duration(
+                driver
+            )
+
+            self._human_pause()
+
+            self._select_resolution(
                 driver
             )
 
