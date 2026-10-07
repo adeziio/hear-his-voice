@@ -33,6 +33,23 @@ sees while those words are spoken.
 
 ---
 
+## Screenshots
+
+![App overview — episode workflow](web/screenshots/overview.png)
+
+The Web UI drives the whole pipeline: select a Scripture passage, generate the
+episode, preview the rendered Short, and publish it.
+
+|                        |                          |
+| ---------------------- | ------------------------ |
+| ![YouTube upload](web/screenshots/youtube.png) | ![Instagram publish](web/screenshots/instagram.png) |
+
+The images above are placeholders. Capture fresh screenshots of the app
+and drop them into `web/screenshots/` — `overview.png`, `instagram.png`,
+and `youtube.png` — and the README picks them up automatically.
+
+---
+
 ## 📖 The Scripture source
 
 | | |
