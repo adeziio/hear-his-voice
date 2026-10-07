@@ -1182,6 +1182,11 @@ class ContentGenerator(
             )
         )
 
+        narration = repair_source_word_punctuation(
+            scripture.get("text", ""),
+            narration,
+        )
+
         self.log(
             f"Narration ready ({len(narration.split())} words)."
         )
@@ -1268,6 +1273,74 @@ def _clean_narration(text):
     )
 
     return value.strip()
+
+
+def repair_source_word_punctuation(source_text, narration):
+    """
+    Repairs punctuation inserted inside source-derived words.
+
+    This is deliberately narrower than spellchecking. A narration token is
+    changed only when its letters, ignoring punctuation, exactly match one
+    source token's letters, and the narration token contains internal
+    punctuation that the source token does not. The narration's surrounding
+    punctuation and all unrelated wording remain unchanged.
+
+    For example, ``bapt,ize`` is restored to ``baptize`` because the exact
+    source text contains ``baptize``. A word that is not present in the
+    source is never changed.
+    """
+    source_tokens = str(source_text or "").split()
+    narration_tokens = str(narration or "").split()
+
+    source_forms = {}
+    for token in source_tokens:
+        match = _word_token_parts(token)
+        if match is None:
+            continue
+
+        _leading, core, _trailing = match
+        key = _source_word_key(core)
+        if not key:
+            continue
+
+        source_forms.setdefault(key, set()).add(core)
+
+    repaired = []
+    for token in narration_tokens:
+        match = _word_token_parts(token)
+        if match is None:
+            repaired.append(token)
+            continue
+
+        leading, core, trailing = match
+        key = _source_word_key(core)
+        candidates = source_forms.get(key, set())
+
+        if (
+            len(candidates) == 1
+            and core != next(iter(candidates))
+            and any(not char.isalnum() for char in core)
+        ):
+            source_core = next(iter(candidates))
+            repaired.append(leading + source_core + trailing)
+        else:
+            repaired.append(token)
+
+    return " ".join(repaired)
+
+
+def _word_token_parts(token):
+    """Returns leading punctuation, word core, and trailing punctuation."""
+    match = re.match(
+        r"^([^A-Za-z0-9]*)([A-Za-z0-9][A-Za-z0-9,'’\-]*[A-Za-z0-9]|[A-Za-z0-9]+)([^A-Za-z0-9]*)$",
+        str(token),
+    )
+    return match.groups() if match else None
+
+
+def _source_word_key(value):
+    """Normalizes a word only for source-token comparison."""
+    return re.sub(r"[^A-Za-z0-9]", "", str(value)).casefold()
 
 
 def _first_sentence(text):
