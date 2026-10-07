@@ -202,6 +202,15 @@ SnapGenAI `search_query` and its `sentence` field contains the exact narration
 spoken during that visual portion. The count and prompts therefore adapt when
 the generated passage changes.
 
+Each segment is presented to the visual model **with the narration immediately
+before and after it**, so its prompt is written for that exact moment of the
+story rather than for the passage in general. The visual rules in
+`config/content.json` hold the matching continuity requirements: the same place,
+positions, and ongoing conditions (storm, darkness, crowds, water) are carried
+between related visuals, a character the narration keeps outside a place stays
+outside it, actions are shown in physically plausible positions, and no detail
+is added that would change the context of the scene.
+
 How far a passage can actually reach is bounded by the size of its window in
 `content.json` → `scripture.references` — a window is what the passage is allowed
 to read, and the selector never reads past its end. So a large target is only

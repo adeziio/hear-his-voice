@@ -61,6 +61,55 @@ class ContentGenerationError(
     pass
 
 
+def format_segments_with_context(segments):
+    """
+    Lists each narration segment together with the narration that comes
+    immediately before and after it.
+
+    A visual has to be directed at one exact moment of the story, and a
+    segment on its own rarely says where that moment sits: "they came to
+    him and woke him" looks completely different depending on whether the
+    storm has already risen and the disciples are already afraid. The
+    neighbouring narration is what tells the director what has just
+    happened and what happens next, so the shot written for the segment
+    belongs to that moment instead of to the passage in general, and so
+    place, position, and ongoing conditions can be carried from one
+    visual into the next.
+
+    The context lines are indented labels, never SEGMENT headers: the
+    number of "SEGMENT n:" lines is still exactly the number of
+    segments, so the exact-count direction schema and the one-visual-
+    per-segment rule are untouched.
+    """
+    blocks = []
+
+    total = len(segments)
+
+    for index, segment in enumerate(segments):
+
+        if index == 0:
+            before = (
+                "(nothing - this segment opens the narration)"
+            )
+        else:
+            before = segments[index - 1]
+
+        if index + 1 >= total:
+            after = (
+                "(nothing - this segment closes the narration)"
+            )
+        else:
+            after = segments[index + 1]
+
+        blocks.append(
+            f"SEGMENT {index + 1}: {segment}\n"
+            f"  JUST BEFORE: {before}\n"
+            f"  JUST AFTER: {after}"
+        )
+
+    return "\n".join(blocks)
+
+
 # The AI directs the episode; it does not author the Scripture.
 #
 # This is the visual-direction schema, and it has no narration field at
@@ -333,8 +382,9 @@ class ContentGenerator(
            the passage itself for fidelity (write_narration),
         2. splits that narration into spoken segments
            (deterministic),
-        3. asks the AI for one SnapGenAI prompt describing the overall
-           passage,
+        3. asks the AI for one SnapGenAI prompt per narration segment,
+           each shown the narration immediately before and after it so
+           the prompt fits that exact moment of the story,
         4. asks for a title, summary, and mood.
 
     The passage remains the authority throughout: the narration may
@@ -508,10 +558,12 @@ class ContentGenerator(
             ).strip()
             + "\n\n"
             "THE FIXED NARRATION, IN VISUAL SEGMENTS\n"
-            + "\n".join(
-                f"SEGMENT {index}: {segment}"
-                for index, segment in enumerate(segments, start=1)
-            )
+            "Each segment is shown with the narration immediately around "
+            "it, so you can see what has just happened and what happens "
+            "next at that point in the story. The segment line is what "
+            "you direct; the two indented lines are context for that "
+            "moment only - they are not separate visuals.\n"
+            + format_segments_with_context(segments)
             + "\n\nVISUAL PROMPT RULES\n"
             "Return exactly one visual object for each numbered narration "
             "segment above, in the same order. Each search_query will be "
@@ -525,6 +577,37 @@ class ContentGenerator(
             "subject, setting, action, and atmosphere. Begin with 'Style: "
             "realistic.' Do not write a stock-footage search query, "
             "narration, explanation, or list.\n"
+            "Read the whole narration and the context lines before "
+            "writing a prompt. Direct each prompt at that segment's exact "
+            "moment in the story - what the viewer should see while these "
+            "words are spoken, given what has JUST happened and what "
+            "happens NEXT - rather than at the passage in general.\n"
+            "Keep physical and spatial continuity between related "
+            "visuals: when consecutive segments happen in the same place "
+            "and situation, keep the same location, the same positions, "
+            "and the same circumstances in each prompt, and change them "
+            "only where the narration itself changes them - a move, an "
+            "entrance, a departure, or a change of time or weather.\n"
+            "Place people exactly where the narration places them. If "
+            "someone is outside a place - outside the tomb, on the shore, "
+            "at a distance, in the boat, before a closed door - keep them "
+            "outside it unless the narration says they entered. Never "
+            "move a scene indoors, into a city, or onto a road the "
+            "narration never mentions.\n"
+            "Depict each action in a physically plausible position for "
+            "that action: someone asleep lies down, someone praying "
+            "kneels or stands with head bowed, someone travelling is on "
+            "their feet on the way, someone addressing a crowd faces the "
+            "crowd.\n"
+            "Carry ongoing conditions across the related visuals - storm, "
+            "darkness, night, rain, wind, waves, crowds, water, fire, "
+            "heat, cold - and never introduce a condition that "
+            "contradicts one the narration still holds true: no calm "
+            "water in a violent storm, no bright daylight in a narrated "
+            "night, no empty street in a narrated crowd. Change a "
+            "condition only when the narration says it changed.\n"
+            "Do not add details, people, objects, or events that change "
+            "the context of the scene the narration describes.\n"
             + visual_rules
             + "\n\nVISUAL STYLE\n"
             + creative_directions
@@ -533,7 +616,10 @@ class ContentGenerator(
             "segment, in order. Each object's \"search_query\" must be a "
             "distinct, complete SnapGenAI visual prompt for that segment, "
             "including its specific scene, subject, action, setting, and "
-            "atmosphere. The object's \"visual_direction\" should repeat "
+            "atmosphere. Consecutive prompts must also read as one "
+            "continuous story - same place, same people, same ongoing "
+            "conditions - wherever the narration keeps them there. The "
+            "object's \"visual_direction\" should repeat "
             "that same segment shot in one concise sentence.\n"
             + "\n\nTITLE RULES\n"
         "The title must be clear, factual, and about what this "
@@ -676,7 +762,20 @@ class ContentGenerator(
 
             query = str(entry.get("search_query", "")).strip()
             if not query:
-                query = self._fallback_query(segment)
+                # The fallback still has to belong to this moment of the
+                # story: the narration on either side of the segment is
+                # handed over with it, so a very short segment borrows
+                # its setting from what surrounds it instead of
+                # falling back to an unrelated default.
+                context = " ".join(
+                    neighbour
+                    for neighbour in (
+                        segments[index - 1] if index > 0 else "",
+                        segments[index + 1] if index + 1 < len(segments) else "",
+                    )
+                    if neighbour
+                )
+                query = self._fallback_query(segment, context)
 
             visuals.append({
                 "search_query": query,
@@ -774,12 +873,20 @@ class ContentGenerator(
 
     def _fallback_query(
         self,
-        segment
+        segment,
+        context=""
     ):
         """
         A last-resort visual prompt for a segment the AI left blank.
         SnapGenAI produces better results from concrete subjects, so the
         longest content words in the segment are used.
+
+        `context` is the narration immediately before and after the
+        segment. A segment of its own can be too short to name its
+        setting ("Amen.", "he said."), and the surrounding narration is
+        the same moment of the same story - so its place and its
+        conditions are borrowed to fill the prompt out rather than
+        falling back to an unrelated default.
         """
         stop_words = {
             "the", "a", "an", "and", "or", "but", "is",
@@ -790,15 +897,39 @@ class ContentGenerator(
             "as", "not", "so", "if", "then", "than",
         }
 
-        words = [
-            word
-            for word in re.findall(
-                r"[A-Za-z]{4,}",
-                str(segment)
-            )
-            if word.lower()
-            not in stop_words
-        ]
+        def content_words(text):
+
+            return [
+                word
+                for word in re.findall(
+                    r"[A-Za-z]{4,}",
+                    str(text or "")
+                )
+                if word.lower()
+                not in stop_words
+            ]
+
+        words = content_words(segment)
+
+        if len(words) < 3:
+
+            seen = {
+                word.lower()
+                for word in words
+            }
+
+            for word in content_words(context):
+
+                if word.lower() in seen:
+
+                    continue
+
+                words.append(word)
+                seen.add(word.lower())
+
+                if len(words) >= 3:
+
+                    break
 
         return " ".join(
             words[:3]

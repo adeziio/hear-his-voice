@@ -115,7 +115,13 @@
             "Avoid graphic, violent, frightening, or distressing imagery. Nothing should be horror, gore, wreckage, or disaster. The register is calm, dignified, and hopeful.",
             "Avoid modern clothing, contemporary buildings, vehicles, technology, city infrastructure, corporate interiors, polished modern homes, staged lifestyle scenes, and obvious modern stock-video settings whenever possible. Also avoid anything that would look wrong next to the Word of God: neon club lighting, arcade machines, fast cars, smartphones, meme-style reactions, text overlays, or watermarks.",
             "Keep each segment prompt cohesive rather than listing separate shots or scenes. Focus on one strong visual moment that can carry that portion of the narration.",
-            "Do not include quotation marks, text overlays, subtitles, watermarks, modern settings, or an explanation of the prompt."
+            "Do not include quotation marks, text overlays, subtitles, watermarks, modern settings, or an explanation of the prompt.",
+            "Read each segment with the narration immediately before and after it, and write the visual for that exact moment of the story - what is happening right then - rather than for the passage in general.",
+            "Maintain physical and spatial continuity between related visuals: consecutive segments set in the same place and situation must keep the same location, positions, and circumstances, changing them only where the narration itself changes them.",
+            "Keep characters where the narration places them. A character described as outside a place - outside the tomb, on the shore, at a distance, in the boat, before a closed door - stays outside it unless the narration says they entered; never relocate a scene to a place the narration does not mention.",
+            "Depict each action in a physically plausible position for that action: a sleeping figure lies down, one who prays kneels or bows their head, one travelling walks the road, one addressing a crowd faces the crowd.",
+            "Preserve ongoing environmental conditions across related visuals - storm, darkness, night, rain, crowds, water, fire, weather - and never introduce a contradictory condition, such as calm water during a violent storm or bright daylight during a narrated night, unless the narration says the conditions changed.",
+            "Do not add details, people, objects, or events that change the context of the scene the narration describes; keep the visual faithful to the moment and its surrounding story."
         ],
         "creative_directions": [
             "You are directing the visuals for an original narration that tells one passage of Scripture faithfully. Your job is to make the viewer feel the passage, not to explain it.",
