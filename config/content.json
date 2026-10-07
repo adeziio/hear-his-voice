@@ -100,12 +100,12 @@
             "Keep the telling about the length of the passage - no less than half of it and no more than twice it, and always between 40 and 400 words."
         ],
         "visual_rules": [
-            "Generate exactly one SnapGenAI visual prompt for the entire Gospel passage. Do not generate separate prompts for individual segments or parts of the narration. The single generated clip supports the whole episode.",
-            "Base each query on the MEANING, THEME, SETTING, MOOD or IMAGERY of its segment. Decide what this passage is actually about, then search for footage that carries that sense - not for a prop that merely happens to appear somewhere in the sentence.",
+            "Generate exactly one distinct SnapGenAI visual prompt for each narration segment. Each prompt must match the specific sentences, actions, events, setting, and emotional moment narrated during that segment; never reuse one generic prompt for the whole episode.",
+            "Base each query on the MEANING, THEME, SETTING, MOOD or IMAGERY of its segment. Decide what is happening in that portion of the story, then create a coherent visual that carries that sense - not a prop that merely happens to appear somewhere in the sentence.",
             "Prefer cinematic, reverent, historically appropriate, atmospheric, timeless biblical atmosphere and scene elements: landscapes, ancient-looking stone and earth, desert and hill country, old parchment and handwriting, olive and vine, lamplight, weathered wood and linen, long roads, quiet water, boats, open sky, fields at golden hour, crowds, silhouettes, and meaningful objects.",
-            "Use one complete, straightforward visual prompt beginning with 'Style: realistic.' Describe the main scene, subject, setting, and atmosphere of the passage in clear descriptive language.",
+            "Use one complete, straightforward visual prompt per segment beginning with 'Style: realistic.' Describe the specific main scene, subject, action, setting, and atmosphere of that narration segment in clear descriptive language.",
             "Write a prompt for AI video generation, not a stock-footage search query. It may directly describe the biblical scene when that is the main visual subject, while remaining reverent, cinematic, and faithful to the passage.",
-            "Build each query from two or three concrete, searchable ideas: the strongest landscape, ancient-looking environment, nature or weather element, boat, road, crowd, silhouette, or object plus the segment's atmosphere. Prefer combinations such as 'stormy lake night', 'desert road golden hour', 'lamplit ancient room', 'quiet olive grove', or 'silhouettes on hillside' over abstract theology or sentence-like descriptions.",
+            "Build each query from two or three concrete, searchable ideas grounded in that segment: the strongest landscape, ancient-looking environment, nature or weather element, boat, road, crowd, silhouette, or object plus the segment's atmosphere. Prefer combinations such as 'stormy lake night', 'desert road golden hour', 'lamplit ancient room', 'quiet olive grove', or 'silhouettes on hillside' over abstract theology or sentence-like descriptions.",
             "Describe the central scene directly when the passage provides one. Do not add events, people, actions, objects, or visual details that the passage does not support.",
             "When the passage is not easily represented as one literal scene, choose a coherent thematic visual grounded in its setting, era, material world, emotional register, or natural element.",
             "Avoid awkward or impossible depictions of unseen actions. Prefer a filmable main scene with a clear subject, setting, natural light, and atmosphere that supports the passage as a whole.",
@@ -114,7 +114,7 @@
             "For list-like passages such as genealogies, use a dignified visual that represents the passage's people, place, era, or written record without inventing a dramatic event.",
             "Avoid graphic, violent, frightening, or distressing imagery. Nothing should be horror, gore, wreckage, or disaster. The register is calm, dignified, and hopeful.",
             "Avoid modern clothing, contemporary buildings, vehicles, technology, city infrastructure, corporate interiors, polished modern homes, staged lifestyle scenes, and obvious modern stock-video settings whenever possible. Also avoid anything that would look wrong next to the Word of God: neon club lighting, arcade machines, fast cars, smartphones, meme-style reactions, text overlays, or watermarks.",
-            "Keep the single prompt cohesive rather than listing separate shots or scenes. Focus on one strong overall visual that can carry the entire episode.",
+            "Keep each segment prompt cohesive rather than listing separate shots or scenes. Focus on one strong visual moment that can carry that portion of the narration.",
             "Do not include quotation marks, text overlays, subtitles, watermarks, modern settings, or an explanation of the prompt."
         ],
         "creative_directions": [

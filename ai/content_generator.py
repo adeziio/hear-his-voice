@@ -1,4 +1,5 @@
 import json
+import math
 import re
 
 from pathlib import Path
@@ -12,53 +13,45 @@ from scripture.segmenter import (
 )
 
 
-# The only duration setting is app.json -> shorts.target_duration_seconds.
-# How long each visual should cover is the one pacing constant: 60 seconds
-# divided by this gives the 14 segments all three projects were tuned to, so
-# changing the target duration moves the segment count with it and the two
-# numbers can never disagree.
-SECONDS_PER_VISUAL = 60 / 14
-
-DEFAULT_TARGET_SECONDS = 60
+# `target_duration_seconds` is only a target for narration generation. Visual
+# timing is derived from the narration that was actually generated.
+SECONDS_PER_VISUAL = 8
+DEFAULT_WORDS_PER_SECOND = 2.9
 
 # A segment is never smaller than one, however short the target.
 MIN_SEGMENTS_PER_EPISODE = 1
 
 
-def segments_per_episode(config):
+def segments_per_episode(config, narration=None):
     """
-    How many spoken segments - and therefore how many visuals - an episode
-    asks for, derived from the target duration alone: one visual per
-    SECONDS_PER_VISUAL of narration.
+    Returns the approximate number of visual segments for the generated
+    narration, using one visual for about eight seconds of speech.
 
-    This is a guide, not a hard limit. The narration is prose written
-    from the passage, so it cannot be padded or trimmed to hit an exact
-    count - the narration's own punctuation decides the final number of
-    segments. All this sets is how finely it is cut.
+    The configured target duration is deliberately not used here: it is only
+    an instruction for the narration writer, while the generated narration is
+    the source of truth for the episode's actual length.
     """
-    try:
-
-        target_seconds = float(
-            config.get(
-                "app",
-                {}
-            ).get(
-                "shorts",
-                {}
-            ).get(
-                "target_duration_seconds",
-                DEFAULT_TARGET_SECONDS
-            )
-        )
-
-    except (TypeError, ValueError):
-
-        target_seconds = DEFAULT_TARGET_SECONDS
+    words_per_second = float(
+        config.get("content", {})
+        .get("content_generation", {})
+        .get("words_per_second", DEFAULT_WORDS_PER_SECOND)
+    )
+    words_per_second = max(words_per_second, 0.1)
+    word_count = len(str(narration or "").split())
+    expected_duration = word_count / words_per_second
 
     return max(
         MIN_SEGMENTS_PER_EPISODE,
-        int(round(target_seconds / SECONDS_PER_VISUAL))
+        int(math.ceil(expected_duration / SECONDS_PER_VISUAL)),
     )
+
+
+def build_direction_schema(segment_count):
+    """Build the visual schema for the exact number of narration segments."""
+    schema = json.loads(json.dumps(DIRECTION_SCHEMA))
+    schema["properties"]["visuals"]["minItems"] = segment_count
+    schema["properties"]["visuals"]["maxItems"] = segment_count
+    return schema
 
 
 class ContentGenerationError(
@@ -98,7 +91,7 @@ DIRECTION_SCHEMA = {
         "visuals": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 1,
+            "maxItems": 100,
             "items": {
                 "type": "object",
                 "properties": {
@@ -395,15 +388,10 @@ class ContentGenerator(
         scripture
     ):
         """
-        Splits the exact WEBC text into spoken segments for the existing
-        narration/composition timeline. Visual generation uses the whole
-        passage and does not create one prompt per segment.
-
-        The count follows the passage's own length, aiming at one
-        visual every few seconds and never letting a single visual
-        cover more than about ten seconds of narration. Long sentences
-        are broken at their own punctuation, so no visual is stuck
-        holding an entire verse.
+        Splits the generated narration into visual segments. The narration
+        itself determines the expected episode duration and therefore the
+        approximate number of visuals; the configured target is not used as
+        the final-duration assumption.
         """
         text = scripture["text"]
 
@@ -414,7 +402,7 @@ class ContentGenerator(
                 "content",
                 {}
             ).get(
-                "scripture",
+                "content_generation",
                 {}
             )
             .get(
@@ -423,54 +411,24 @@ class ContentGenerator(
             )
         )
 
-        # The episode's target length is the only input, exactly as in
-        # the other project: total spoken words come from it, and the
-        # per-segment size is that total divided by the number of
-        # segments. There is no separate "seconds per visual" setting.
-        shorts_config = (
-            self.config.get(
-                "app",
-                {}
-            ).get(
-                "shorts",
-                {}
-            )
-        )
-
-        target_seconds = float(
-            shorts_config.get(
-                "target_duration_seconds",
-                50
-            )
-        )
-
-        segment_count = max(
-            1,
-            segments_per_episode(self.config)
-        )
-
-        word_target = int(
-            target_seconds
-            * words_per_second
-        )
-
+        segment_count = segments_per_episode(self.config, text)
         words_per_segment = max(
             1,
-            word_target // segment_count
+            int(round(words_per_second * SECONDS_PER_VISUAL)),
         )
 
         segments = build_visual_segments(
             text,
             segment_count,
             clause_words=words_per_segment,
-            max_words_per_segment=words_per_segment + 3,
+            max_words_per_segment=words_per_segment + 6,
         )
 
         self.log(
             f"{len(segments)} visual segments for "
             f"{len(text.split())} words "
             f"(~{len(text.split()) / max(words_per_second, 0.1):.0f}s "
-            f"of narration, {words_per_segment} words per segment)."
+            f"of narration, target {SECONDS_PER_VISUAL}s per segment)."
         )
 
         return segments
@@ -549,29 +507,34 @@ class ContentGenerator(
                 scripture.get("text") or ""
             ).strip()
             + "\n\n"
-            "THE FIXED NARRATION\n"
-            + " ".join(str(segment) for segment in segments)
+            "THE FIXED NARRATION, IN VISUAL SEGMENTS\n"
+            + "\n".join(
+                f"SEGMENT {index}: {segment}"
+                for index, segment in enumerate(segments, start=1)
+            )
             + "\n\nVISUAL PROMPT RULES\n"
-            "Create one prompt for the entire Gospel passage, not one "
-            "prompt for individual segments or narration parts. The "
-            "prompt will be sent to SnapGenAI to generate one visual clip "
-            "for the whole episode. Make it straightforward and "
-            "descriptive: identify the main scene, subject, setting, and "
-            "atmosphere. Begin with 'Style: realistic.' Do not write a "
-            "stock-footage search query, narration, explanation, or list.\n"
+            "Return exactly one visual object for each numbered narration "
+            "segment above, in the same order. Each search_query will be "
+            "sent to SnapGenAI for that segment's clip. The prompt must "
+            "depict the specific sentence, action, event, setting, and "
+            "emotional moment narrated in that segment. Keep related "
+            "sentences and events together, and make the visuals progress "
+            "naturally from the beginning to the end of the story. Do not "
+            "reuse one generic overall-passage prompt. Make each prompt "
+            "straightforward and descriptive: identify the main scene, "
+            "subject, setting, action, and atmosphere. Begin with 'Style: "
+            "realistic.' Do not write a stock-footage search query, "
+            "narration, explanation, or list.\n"
             + visual_rules
             + "\n\nVISUAL STYLE\n"
             + creative_directions
             + "\n\nFINAL OUTPUT\n"
-            "Return exactly one object in \"visuals\". Its \"search_query\" "
-            "must be one complete SnapGenAI visual prompt for the overall "
-            "passage, including the main scene, subject, setting, and "
-            "atmosphere. Example: 'Style: realistic. Wide view of Jesus "
-            "walking on the ocean water at night. In the distance, a small "
-            "wooden boat carrying several disciples struggles against violent "
-            "waves. Dark stormy sky, dramatic moonlight.' The object's "
-            "\"visual_direction\" should repeat the same overall shot in "
-            "one concise sentence.\n"
+            "Return exactly one object in \"visuals\" for every numbered "
+            "segment, in order. Each object's \"search_query\" must be a "
+            "distinct, complete SnapGenAI visual prompt for that segment, "
+            "including its specific scene, subject, action, setting, and "
+            "atmosphere. The object's \"visual_direction\" should repeat "
+            "that same segment shot in one concise sentence.\n"
             + "\n\nTITLE RULES\n"
         "The title must be clear, factual, and about what this "
         "passage actually says or does. Write it in plain words.\n"
@@ -705,20 +668,20 @@ class ContentGenerator(
 
             raw_visuals = []
 
-        entry = raw_visuals[0] if raw_visuals else {}
-        if not isinstance(entry, dict):
-            entry = {}
+        visuals = []
+        for index, segment in enumerate(segments):
+            entry = raw_visuals[index] if index < len(raw_visuals) else {}
+            if not isinstance(entry, dict):
+                entry = {}
 
-        query = str(entry.get("search_query", "")).strip()
-        if not query:
-            query = self._fallback_query(
-                scripture.get("text", "")
-            )
+            query = str(entry.get("search_query", "")).strip()
+            if not query:
+                query = self._fallback_query(segment)
 
-        visuals = [{
-            "search_query": query,
-            "sentence": spoken,
-        }]
+            visuals.append({
+                "search_query": query,
+                "sentence": segment,
+            })
 
         title = str(
             direction.get(
@@ -1118,7 +1081,7 @@ class ContentGenerator(
 
         response = self.llm.generate(
             prompt,
-            response_format=DIRECTION_SCHEMA
+            response_format=build_direction_schema(len(segments))
         )
 
         return self.assemble_content(

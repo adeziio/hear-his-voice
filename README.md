@@ -186,19 +186,21 @@ The project is **configuration-driven**.
 | `config/ai_models.json` | SnapGenAI video-generation settings and Ollama model options |
 | `config/freesafemusic.json` | Music provider settings |
 
-**One number drives the length.** `app.json` → `shorts.target_duration_seconds`
-is the only definition of how long an episode is; no other config repeats it.
-Everything downstream derives from it, the same way the other project does:
+`app.json` → `shorts.target_duration_seconds` is the narration's target
+duration, not a promise about the final episode length. The generated
+narration is the source of truth for the actual episode duration and visual
+timing:
 
 ```text
-word_target       = target_duration_seconds × words_per_second
-words_per_segment = word_target ÷ segments_per_episode
+expected_duration = generated_narration_words ÷ words_per_second
+visual_count      ≈ expected_duration ÷ 8 seconds
 ```
 
-`shorts.segments_per_episode` is the number of spoken segments — and therefore
-visuals — per episode, set to `14` to match the other project's 14 narration
-sentences and 14 visuals. Segment *size* is derived, so changing `50` to `150`
-gives each visual three times the room without touching anything else.
+Visual segments are grouped at existing sentence/clause boundaries, keeping
+related narration together where practical. Each segment receives its own
+SnapGenAI `search_query` and its `sentence` field contains the exact narration
+spoken during that visual portion. The count and prompts therefore adapt when
+the generated passage changes.
 
 How far a passage can actually reach is bounded by the size of its window in
 `content.json` → `scripture.references` — a window is what the passage is allowed
