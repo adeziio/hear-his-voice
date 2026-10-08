@@ -1,7 +1,7 @@
 {
   "version": 2,
   "translation": "World English Bible Catholic (WEBC)",
-  "rotation_index": 1,
+  "rotation_index": 0,
   "books": {
     "Matthew": {
       "chapter": 1,
@@ -10,17 +10,17 @@
     },
     "Mark": {
       "chapter": 1,
-      "verse": 12,
+      "verse": 23,
       "cycles": 0
     },
     "Luke": {
       "chapter": 1,
-      "verse": 13,
+      "verse": 23,
       "cycles": 0
     },
     "John": {
       "chapter": 1,
-      "verse": 15,
+      "verse": 28,
       "cycles": 0
     }
   }
