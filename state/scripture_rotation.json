@@ -5,22 +5,22 @@
   "books": {
     "Matthew": {
       "chapter": 1,
-      "verse": 25,
+      "verse": 1,
       "cycles": 0
     },
     "Mark": {
       "chapter": 1,
-      "verse": 23,
+      "verse": 1,
       "cycles": 0
     },
     "Luke": {
       "chapter": 1,
-      "verse": 23,
+      "verse": 1,
       "cycles": 0
     },
     "John": {
       "chapter": 1,
-      "verse": 28,
+      "verse": 1,
       "cycles": 0
     }
   }
