@@ -182,8 +182,6 @@ class SnapGenAiProvider:
 
     DEFAULT_BASE_URL = "https://snapgen.ai/"
 
-    DEFAULT_HISTORY_URL = "https://snapgen.ai/history"
-
     DEFAULT_PROFILE_DIRECTORY = (
         "media/browser_profile/snapgenai"
     )
@@ -388,27 +386,6 @@ class SnapGenAiProvider:
         return (
             base_url
             or self.DEFAULT_BASE_URL
-        )
-
-    def _history_url(
-        self
-    ):
-
-        # The history page lists previously generated videos in a
-        # grid; the most recent generation appears first. After the
-        # prompt is submitted the provider navigates here and waits
-        # for the newest grid item's Download button.
-
-        history_url = str(
-            self._setting(
-                "history_url",
-                self.DEFAULT_HISTORY_URL
-            )
-        ).strip()
-
-        return (
-            history_url
-            or self.DEFAULT_HISTORY_URL
         )
 
     def _headless(
@@ -705,149 +682,16 @@ class SnapGenAiProvider:
                 element
             )
 
-    def _first_download_candidate(
-        self,
-        driver
-    ):
-
-        # Returns the first Download control present in the DOM
-        # regardless of visibility, so a hover-revealed button can
-        # still be located in order to hover its card.
-
-        for selector in self._download_selectors():
-
-            by, value = parse_selector(
-                selector
-            )
-
-            try:
-
-                elements = driver.find_elements(
-                    by,
-                    value
-                )
-
-            except WebDriverException:
-
-                continue
-
-            if elements:
-
-                return elements[0]
-
-        return None
-
-    def _hover_target_selector(self):
-
-        return self._setting(
-            "hover_target_selector",
-            "",
-        )
-
-    def _grid_hover_target(self, driver):
-
-        # Picks an element to hover so the first grid card reveals its
-        # Download button. Prefers an explicit selector, then a configured
-        # history grid XPath, then the first visible card element (image,
-        # link, div, span, video, li, figure, section, or article), then
-        # the first Download control already in the DOM as a last resort.
-        #
-        # The history grid only shows a clip's Download button while its
-        # card is hovered, so picking the wrong element (e.g. a hidden
-        # download button instead of the first card) leaves the button
-        # unrevealed and the download never starts.
-
-        # 1. Explicit config-driven selector for the first card.
-        selector = str(
-            self._hover_target_selector()
-        ).strip()
-
-        if selector:
-            element = self._find_visible(
-                driver,
-                [selector]
-            )
-            if element is not None:
-                return element
-
-        # 2. Configured parent grid XPath -> first card inside it.
-        grid_selector = str(
-            self._setting(
-                "history_grid_selector",
-                ""
-            )
-        ).strip()
-
-        if grid_selector:
-            try:
-                cards = driver.find_elements(
-                    By.XPATH,
-                    f"{grid_selector}/div[1]"
-                )
-            except WebDriverException:
-                cards = []
-
-            if cards:
-                first_card = cards[0]
-                if first_card.is_displayed():
-                    return first_card
-
-        # 3. Common card element tags, checked in order of specificity.
-        card_tags = (
-            "img",
-            "a",
-            "div",
-            "span",
-            "video",
-            "li",
-            "figure",
-            "section",
-            "article",
-        )
-
-        for tag in card_tags:
-            try:
-                elements = driver.find_elements(
-                    By.TAG_NAME,
-                    tag
-                )
-            except WebDriverException:
-                continue
-
-            for element in elements:
-                try:
-                    if element.is_displayed():
-                        return element
-                except WebDriverException:
-                    continue
-
-        # 4. Last resort: hover the first download control in the DOM so
-        #    its card still gets hovered (even though the control itself
-        #    is hidden and may be the wrong target). This is a fallback
-        #    for pages whose grid uses unexpected card markup.
-        return self._first_download_candidate(driver)
-
     def _reveal_first_download(self, driver):
 
-        # Wait for the Download button to appear. The button only
-        # becomes visible when the page is ready and its card is
-        # hovered/clicked. This method just waits and returns the
-        # button once it's visible, or None if it never appears.
+        # Simple probe: return the Download Video button as soon as
+        # it is visible on the same generation screen. No hovering,
+        # no grid clicking, no page navigation.
 
-        deadline = time.monotonic() + self._seconds(
-            "page_timeout_seconds", 60
+        return self._find_visible(
+            driver,
+            self._download_selectors()
         )
-
-        while time.monotonic() < deadline:
-            element = self._find_visible(
-                driver,
-                self._download_selectors()
-            )
-            if element is not None:
-                return element
-            time.sleep(0.5)
-
-        return None
 
     def _create_driver(
         self,
@@ -1907,51 +1751,6 @@ class SnapGenAiProvider:
             f"{page_timeout:g} seconds."
         )
 
-    def _open_history_page(
-        self,
-        driver
-    ):
-
-        # After a prompt is submitted the finished render is listed
-        # on the account history page rather than staying on the
-        # generation page, so the provider navigates here to wait
-        # for and grab the newest grid item's Download button.
-
-        history_url = (
-            self._history_url()
-        )
-
-        self._notify(
-            f"Opening {history_url}..."
-        )
-
-        driver.get(
-            history_url
-        )
-
-        page_timeout = self._seconds(
-            "page_timeout_seconds",
-            60
-        )
-
-        deadline = time.monotonic() + page_timeout
-
-        while time.monotonic() < deadline:
-
-            if driver.find_elements(
-                By.TAG_NAME,
-                "body"
-            ):
-
-                return
-
-            time.sleep(0.5)
-
-        raise SnapGenAiError(
-            f"The SnapGenAI history page did not load "
-            f"within {page_timeout:g} seconds."
-        )
-
     def _enter_prompt(
         self,
         driver,
@@ -2465,16 +2264,14 @@ class SnapGenAiProvider:
         driver
     ):
 
-        # Waits on the SnapGenAI history page for the first grid
-        # item's Download button to appear. The wait is intentionally
-        # unbounded: the page is refreshed once per check interval
-        # (default 2 minutes) so a render that finishes during the
-        # wait is reflected in the DOM, and the loop keeps going until
-        # the Download button shows up. It never times out and never
-        # fails on its own - a finished render is simply waited for.
+        # Waits on the same generation screen for the Download Video
+        # button to appear after Generate is clicked. The wait is
+        # intentionally unbounded: poll the DOM every check interval
+        # until the button shows up. No navigation, no refresh, no
+        # modal clicking - just wait for the same-screen control.
 
         check_interval = self._seconds(
-            "history_check_interval_seconds",
+            "generation_check_interval_seconds",
             120
         )
 
@@ -2486,57 +2283,14 @@ class SnapGenAiProvider:
         ).strip()
 
         self._notify(
-            "Waiting for the generated video to appear in "
-            "SnapGenAI history; refreshing the page every "
-            f"{check_interval:g} seconds until the Download "
-            "button is ready..."
+            "Waiting for the generated video on this page; "
+            f"checking every {check_interval:g} seconds until "
+            "the Download Video button appears..."
         )
 
         started_at = time.monotonic()
 
         while True:
-
-            # Wait one full interval before each look so a slow render
-            # is not disturbed and the first check happens no earlier
-            # than one interval after arriving on the history page.
-
-            time.sleep(
-                check_interval
-            )
-
-            # Refresh the history page so any render that finished
-            # during the wait is reflected in the DOM before we look
-            # for its Download button.
-
-            driver.refresh()
-
-            # Give the refreshed page a moment to render its body
-            # before probing for controls.
-
-            page_timeout = self._seconds(
-                "page_timeout_seconds",
-                60
-            )
-
-            body_deadline = (
-                time.monotonic()
-                +
-                page_timeout
-            )
-
-            while time.monotonic() < body_deadline:
-
-                if driver.find_elements(
-                    By.TAG_NAME,
-                    "body"
-                ):
-
-                    break
-
-                time.sleep(0.5)
-
-            # The first card's Download button only appears while the
-            # card is hovered, so hover to reveal it before checking.
 
             if self._reveal_first_download(
                 driver
@@ -2573,8 +2327,12 @@ class SnapGenAiProvider:
 
             self._notify(
                 f"Still generating... ({elapsed}s elapsed) - "
-                "download not ready yet, refreshing the page "
+                "download not ready yet, checking "
                 f"again in {check_interval:g} seconds."
+            )
+
+            time.sleep(
+                check_interval
             )
 
     def _snapshot(
@@ -2602,9 +2360,8 @@ class SnapGenAiProvider:
             download_directory
         )
 
-        # The Download button is hidden until its grid card is
-        # hovered, so hover to reveal it, then grab the now-visible
-        # control to click.
+        # The Download Video button appears on the same
+        # generation screen once the render finishes.
 
         element = self._reveal_first_download(
             driver
@@ -2814,16 +2571,9 @@ class SnapGenAiProvider:
 
             self._human_pause()
 
-            # The finished render is listed on the account history
-            # page rather than staying on the generation page, so
-            # navigate there and wait for the newest grid item's
-            # Download button to appear.
-
-            self._open_history_page(
-                driver
-            )
-
-            self._human_pause()
+            # Stay on the same generation screen and wait
+            # indefinitely for the Download Video button to
+            # appear. No history page, no refresh, no modal.
 
             self._wait_for_generation(
                 driver
