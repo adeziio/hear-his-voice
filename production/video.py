@@ -695,7 +695,14 @@ class ProductionPipeline:
 
         narration_sentences = []
         if isinstance(content, dict):
-            narration_sentences = content.get("narration_sentences", [])
+            # Each visual carries the narration sentence it depicts, in
+            # order - that pairing is the single source of truth. There
+            # is no separate top-level narration_sentences field.
+            narration_sentences = [
+                str(v.get("sentence", "")).strip()
+                for v in content.get("visuals", [])
+                if isinstance(v, dict) and str(v.get("sentence", "")).strip()
+            ]
         if not narration_sentences:
             return []
 

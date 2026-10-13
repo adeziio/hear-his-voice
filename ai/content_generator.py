@@ -1,5 +1,4 @@
 import json
-import math
 import re
 
 from pathlib import Path
@@ -9,49 +8,114 @@ from ai.providers.ollama_provider import OllamaProvider
 
 from scripture.segmenter import (
     split_sentences,
-    build_visual_segments
+    build_sentence_segments
 )
 
 
 # `target_duration_seconds` is only a target for narration generation. Visual
 # timing is derived from the narration that was actually generated.
-SECONDS_PER_VISUAL = 8
+#
+# Each SnapGenAI clip carries one visual segment, and its length is the
+# `duration_target` in config/ai_models.json (for example "8s"). The
+# spoken-length ceiling used when splitting the narration is read from that
+# setting by _duration_target_seconds() rather than hardcoded: every
+# completed narration sentence becomes one segment and one clip, and only a
+# sentence that would speak for longer than the clip is divided at its own
+# punctuation into shorter sentences. A shorter sentence is fine as it is -
+# the duration is a maximum, never a duration to fill. The default below is
+# only the fallback used when that setting is missing or cannot be parsed.
+DEFAULT_SECONDS_PER_VISUAL = 8
 DEFAULT_WORDS_PER_SECOND = 2.9
 
-# A segment is never smaller than one, however short the target.
-MIN_SEGMENTS_PER_EPISODE = 1
 
-
-def segments_per_episode(config, narration=None):
+def _duration_target_seconds(config):
     """
-    Returns the approximate number of visual segments for the generated
-    narration, using one visual for about eight seconds of speech.
+    Returns the SnapGenAI clip length in seconds, read from
+    config/ai_models.json -> models.video_model.snapgenai.duration_target
+    (for example "8s").
 
-    The configured target duration is deliberately not used here: it is only
-    an instruction for the narration writer, while the generated narration is
-    the source of truth for the episode's actual length.
+    One clip carries one narration sentence, so this is the maximum
+    spoken length any one segment should reach before it is divided. The
+    value comes from configuration, never from a hardcoded constant;
+    DEFAULT_SECONDS_PER_VISUAL is only the fallback used when the setting
+    is missing or unparseable.
     """
-    words_per_second = float(
+    snapgenai = (
+        config.get("ai_models", {})
+        .get("models", {})
+        .get("video_model", {})
+        .get("snapgenai", {})
+    )
+
+    match = re.fullmatch(
+        r"(\d+(?:\.\d+)?)\s*s?",
+        str(
+            snapgenai.get(
+                "duration_target",
+                ""
+            )
+        ).strip(),
+        flags=re.IGNORECASE,
+    )
+
+    if match is None:
+
+        return DEFAULT_SECONDS_PER_VISUAL
+
+    seconds = float(
+        match.group(1)
+    )
+
+    if seconds <= 0:
+
+        return DEFAULT_SECONDS_PER_VISUAL
+
+    return seconds
+
+
+def _words_per_second(config):
+    """
+    Returns the narrator's speaking rate, read from config/content.json ->
+    content.content_generation.words_per_second.
+
+    It lives in content.json with the rest of the narration settings, so
+    there is one content config; DEFAULT_WORDS_PER_SECOND is only the
+    fallback used when the setting is missing or unusable.
+    """
+    value = float(
         config.get("content", {})
         .get("content_generation", {})
         .get("words_per_second", DEFAULT_WORDS_PER_SECOND)
     )
-    words_per_second = max(words_per_second, 0.1)
-    word_count = len(str(narration or "").split())
-    expected_duration = word_count / words_per_second
 
     return max(
-        MIN_SEGMENTS_PER_EPISODE,
-        int(math.ceil(expected_duration / SECONDS_PER_VISUAL)),
+        value,
+        0.1
     )
 
 
-def build_direction_schema(segment_count):
-    """Build the visual schema for the exact number of narration segments."""
-    schema = json.loads(json.dumps(DIRECTION_SCHEMA))
-    schema["properties"]["visuals"]["minItems"] = segment_count
-    schema["properties"]["visuals"]["maxItems"] = segment_count
-    return schema
+def _max_words_per_sentence(config):
+    """
+    Returns the most words one narration sentence may hold.
+
+    A sentence is spoken over exactly one SnapGenAI clip, so its spoken
+    length may not exceed that clip's duration_target. This is the same
+    arithmetic build_segments() uses to cut the narration, and it is
+    reused to tell the writer the budget up front, so the telling is
+    written to fit the clips rather than cut to fit them afterwards.
+
+    Both inputs come from configuration, so the limit changes with the
+    configured clip length or speaking rate instead of a hardcoded number.
+    """
+    return max(
+        1,
+        int(
+            round(
+                _words_per_second(config)
+                * _duration_target_seconds(config)
+            )
+        ),
+    )
 
 
 class ContentGenerationError(
@@ -61,109 +125,40 @@ class ContentGenerationError(
     pass
 
 
-def format_segments_with_context(segments):
-    """
-    Lists each narration segment together with the narration that comes
-    immediately before and after it.
-
-    A visual has to be directed at one exact moment of the story, and a
-    segment on its own rarely says where that moment sits: "they came to
-    him and woke him" looks completely different depending on whether the
-    storm has already risen and the disciples are already afraid. The
-    neighbouring narration is what tells the director what has just
-    happened and what happens next, so the shot written for the segment
-    belongs to that moment instead of to the passage in general, and so
-    place, position, and ongoing conditions can be carried from one
-    visual into the next.
-
-    The context lines are indented labels, never SEGMENT headers: the
-    number of "SEGMENT n:" lines is still exactly the number of
-    segments, so the exact-count direction schema and the one-visual-
-    per-segment rule are untouched.
-    """
-    blocks = []
-
-    total = len(segments)
-
-    for index, segment in enumerate(segments):
-
-        if index == 0:
-            before = (
-                "(nothing - this segment opens the narration)"
-            )
-        else:
-            before = segments[index - 1]
-
-        if index + 1 >= total:
-            after = (
-                "(nothing - this segment closes the narration)"
-            )
-        else:
-            after = segments[index + 1]
-
-        blocks.append(
-            f"SEGMENT {index + 1}: {segment}\n"
-            f"  JUST BEFORE: {before}\n"
-            f"  JUST AFTER: {after}"
-        )
-
-    return "\n".join(blocks)
-
-
 # The AI directs the episode; it does not author the Scripture.
 #
-# This is the visual-direction schema, and it has no narration field at
-# all: the model returns one overall-passage search_query plus a
-# visual_direction, together with the title, summary, and mood. The
-# narration itself is written by write_narration() under the separate
+# Visuals are directed ONE narration sentence at a time. Each focused
+# call returns exactly one visual object for the single sentence it was
+# given, so the model is never asked to hold the whole story in one
+# response - the failure mode that collapsed an episode into a handful
+# of repeated establishing shots that contradicted the narration around
+# them. The narration itself is written by write_narration() under
 # NARRATION_SCHEMA below, from the WEBC passage as its only source, so
 # neither call gives the model anywhere to put invented Scripture.
-DIRECTION_SCHEMA = {
+VISUAL_SCHEMA = {
     "type": "object",
     "properties": {
-        # maxLength is not decoration. It is a grammar-level brake on
-        # the two failure modes this channel actually hit: a poetic
-        # title ("Genealogy of Light") and an interpretive summary
-        # ("revealing a divine ancestry rooted in faith and promise"
-        # for a passage that says no such thing).
-        "title": {
-            "type": "string",
-            "maxLength": 90
-        },
-        "summary": {
-            "type": "string",
-            "maxLength": 180
-        },
-        "mood": {
-            "type": "string"
-        },
-        "visuals": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 100,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "search_query": {
-                        "type": "string"
-                    },
-                    "visual_direction": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "search_query",
-                    "visual_direction"
-                ]
-            }
-        }
+        "search_query": {"type": "string"},
+        "visual_direction": {"type": "string"},
     },
-    "required": [
-        "title",
-        "summary",
-        "mood",
-        "visuals"
-    ]
+    "required": ["search_query", "visual_direction"],
+}
+
+
+# The metadata schema: the episode title, summary, and mood, asked for
+# in one separate call after the visuals are written. maxLength is not
+# decoration - it is a grammar-level brake on the two failure modes this
+# channel actually hit: a poetic title ("Genealogy of Light") and an
+# interpretive summary ("revealing a divine ancestry rooted in faith and
+# promise" for a passage that says no such thing).
+METADATA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "maxLength": 90},
+        "summary": {"type": "string", "maxLength": 180},
+        "mood": {"type": "string"},
+    },
+    "required": ["title", "summary", "mood"],
 }
 
 
@@ -180,6 +175,34 @@ NARRATION_SCHEMA = {
     "required": [
         "narration"
     ]
+}
+
+
+# The verification schemas. Each correctness pass answers ONE boolean
+# question in structured form - "does this visual depict this exact
+# sentence?" and "is this narration accurate to the passage?" - so
+# generate() and write_narration() can judge and re-roll their own
+# output instead of shipping whatever the first sample said. The
+# reason/issues field carries WHY it failed, which becomes the feedback
+# the re-roll is written against. A reply that cannot be parsed counts
+# as a failure, never as a pass.
+VISUAL_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "aligned": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["aligned", "reason"],
+}
+
+
+NARRATION_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "accurate": {"type": "boolean"},
+        "issues": {"type": "string"},
+    },
+    "required": ["accurate", "issues"],
 }
 
 
@@ -438,97 +461,89 @@ class ContentGenerator(
         scripture
     ):
         """
-        Splits the generated narration into visual segments. The narration
-        itself determines the expected episode duration and therefore the
-        approximate number of visuals; the configured target is not used as
-        the final-duration assumption.
+        Splits the generated narration into visual segments: one segment
+        per completed narration sentence, so each sentence gets exactly
+        one SnapGenAI prompt and one clip.
+
+        The configured duration_target is the maximum spoken length a
+        segment may reach - only a sentence that would speak for longer
+        than one clip is divided at its own punctuation into shorter
+        sentences. A shorter sentence is kept whole; the duration is a
+        ceiling, never a duration to fill.
         """
         text = scripture["text"]
 
-        # How fast the narrator reads. It lives in content.json with the
-        # rest of the Scripture settings, so there is one content config.
-        words_per_second = float(
-            self.config.get(
-                "content",
-                {}
-            ).get(
-                "content_generation",
-                {}
-            )
-            .get(
-                "words_per_second",
-                2.9
-            )
-        )
+        # How fast the narrator reads, and how long one clip holds - both
+        # from configuration, through the same helpers the narration prompt
+        # uses to tell the writer the budget up front. One sentence is
+        # spoken over one clip, so this is the ceiling for one segment.
+        words_per_second = _words_per_second(self.config)
+        seconds_per_visual = _duration_target_seconds(self.config)
+        max_words_per_segment = _max_words_per_sentence(self.config)
 
-        segment_count = segments_per_episode(self.config, text)
-        words_per_segment = max(
-            1,
-            int(round(words_per_second * SECONDS_PER_VISUAL)),
-        )
-
-        segments = build_visual_segments(
+        segments = build_sentence_segments(
             text,
-            segment_count,
-            clause_words=words_per_segment,
-            max_words_per_segment=words_per_segment + 6,
+            max_words_per_segment,
         )
 
         self.log(
-            f"{len(segments)} visual segments for "
-            f"{len(text.split())} words "
-            f"(~{len(text.split()) / max(words_per_second, 0.1):.0f}s "
-            f"of narration, target {SECONDS_PER_VISUAL}s per segment)."
+            f"{len(segments)} sentence visuals for "
+            f"{len(split_sentences(text))} narration sentences "
+            f"({len(text.split())} words, "
+            f"~{len(text.split()) / max(words_per_second, 0.1):.0f}s, "
+            f"at most {seconds_per_visual:g}s per segment)."
         )
 
         return segments
 
-    def build_prompt(
+    def build_segment_prompt(
         self,
         scripture,
-        segments
+        segments,
+        index,
+        feedback=None
     ):
         """
-        Builds the visual-direction prompt.
+        Builds the visual-direction prompt for ONE narration sentence.
 
-        The Scripture is quoted so the AI understands what each segment
-        is about, but it is told explicitly that the wording is fixed
-        and that it must only answer with direction.
+        A single sentence needs a single focused call: handing the model
+        every sentence at once invites it to collapse the whole story
+        into a few generic establishing shots. This prompt gives the
+        model the full passage and the full telling for context, but
+        marks exactly one sentence - with the narration immediately
+        before and after it - as the one to direct. The output is one
+        visual object, so the model cannot merge or drop beats.
         """
-        channel = self.channel_config.get(
-            "channel",
-            {}
-        )
-
-        name = str(
-            channel.get(
-                "name",
-                "Hear His Voice"
-            )
-        )
-
-        description = str(
-            channel.get(
-                "description",
-                ""
-            )
-        )
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+        description = str(channel.get("description", ""))
 
         visual_rules = self.format_bullets(
-            self.generation_config.get(
-                "visual_rules",
-                []
-            )
+            self.generation_config.get("visual_rules", [])
         )
-
         creative_directions = self.format_bullets(
-            self.generation_config.get(
-                "creative_directions",
-                []
-            )
+            self.generation_config.get("creative_directions", [])
         )
 
-        return (
+        segment = segments[index]
+        before = (
+            segments[index - 1] if index > 0
+            else "(nothing - this sentence opens the narration)"
+        )
+        after = (
+            segments[index + 1] if index + 1 < len(segments)
+            else "(nothing - this sentence closes the narration)"
+        )
+
+        # The whole telling, for context only. A plain numbered list,
+        # not SEGMENT markers, so the one marked sentence below stays
+        # the only thing the model is asked to direct.
+        full_telling = "\n".join(
+            f"{position + 1}. {text}"
+            for position, text in enumerate(segments)
+        )
+
+        prompt = (
             "You are the visual director for \""
             + name
             + "\", a short-form channel that lets Scripture speak "
@@ -538,13 +553,13 @@ class ContentGenerator(
             + scripture["translation"]
             + " text, and it is the authority for this episode. The "
             "narration was already written from that passage and is "
-            "fixed for this call: the narrator speaks that telling "
-            "exactly as written and it is captioned exactly as spoken. You must NEVER "
-            "generate, paraphrase, rewrite, summarise, expand, "
-            "correct, or invent any part of the passage, and you must "
-            "not echo it back in your answer. Your only job is to "
-            "decide what the viewer should SEE while those words are "
-            "spoken.\n\n"
+            "fixed: the narrator speaks it exactly as written and it is "
+            "captioned exactly as spoken. You must NEVER generate, "
+            "paraphrase, rewrite, summarise, expand, correct, or invent "
+            "any part of the passage or the narration, and you must not "
+            "echo either back in your answer. Your only job is to decide "
+            "what the viewer should SEE while ONE sentence of that "
+            "narration is spoken.\n\n"
             "CHANNEL DESCRIPTION\n"
             + description
             + "\n\nSCRIPTURE REFERENCE\n"
@@ -553,103 +568,410 @@ class ContentGenerator(
             + scripture["translation"]
             + ")\n\n"
             "THE PASSAGE - THE SOURCE OF EVERYTHING SPOKEN\n"
-            + str(
-                scripture.get("text") or ""
-            ).strip()
+            + str(scripture.get("text") or "").strip()
             + "\n\n"
-            "THE FIXED NARRATION, IN VISUAL SEGMENTS\n"
-            "Each segment is shown with the narration immediately around "
-            "it, so you can see what has just happened and what happens "
-            "next at that point in the story. The segment line is what "
-            "you direct; the two indented lines are context for that "
-            "moment only - they are not separate visuals.\n"
-            + format_segments_with_context(segments)
-            + "\n\nVISUAL PROMPT RULES\n"
-            "Return exactly one visual object for each numbered narration "
-            "segment above, in the same order. Each search_query will be "
-            "sent to SnapGenAI for that segment's clip. The prompt must "
-            "depict the specific sentence, action, event, setting, and "
-            "emotional moment narrated in that segment. Keep related "
-            "sentences and events together, and make the visuals progress "
-            "naturally from the beginning to the end of the story. Do not "
-            "reuse one generic overall-passage prompt. Make each prompt "
+            "THE FULL NARRATION - CONTEXT ONLY\n"
+            "This is the whole telling, in order. Read it to know who "
+            "the people are and what has already happened. You are NOT "
+            "directing all of it - only the one marked sentence below.\n"
+            + full_telling
+            + "\n\n"
+            "THE SENTENCE YOU ARE DIRECTING\n"
+            "Write exactly one visual for this sentence and nothing "
+            "else. Depict only what this sentence has happening right "
+            "now: an ask is shown as the asking, a cry as the crying "
+            "out, a decision as the deciding - never the doing that "
+            "follows it. The two indented lines are context for this "
+            "moment - they are not part of what you depict.\n"
+            f"SEGMENT {index + 1}: {segment}\n"
+            f"  JUST BEFORE: {before}\n"
+            f"  JUST AFTER: {after}\n\n"
+
+            "VISUAL PROMPT RULES\n"
+            "Return one visual object for this ONE sentence. Its "
+            "search_query is a single, complete SnapGenAI visual prompt "
+            "for this sentence's clip. It must depict the one clear "
+            "event or action this sentence narrates - its setting, its "
+            "people, and its emotional moment - and nothing else. "
+            "Anchor the shot at this exact point in the passage's "
+            "chronology: read the passage above to find where this "
+            "sentence falls in the story, and show only what is "
+            "happening at that point. Never depict an event from a "
+            "later or an earlier part of the passage - no "
+            "flash-forward to what happens next and no flashback to "
+            "what already happened. If the sentence is a cry, a "
+            "question, a statement, or a decision, depict exactly that "
+            "moment, not the action it leads to. Never combine the "
+            "events of two segments into one prompt, and "
+            "never reach into the next sentence's beat before the "
+            "narration gets there. Do not reuse a generic "
+            "overall-passage establishing shot. Make the prompt "
             "straightforward and descriptive: identify the main scene, "
-            "subject, setting, action, and atmosphere. Begin with 'Style: "
-            "realistic.' Do not write a stock-footage search query, "
-            "narration, explanation, or list.\n"
-            "Read the whole narration and the context lines before "
-            "writing a prompt. Direct each prompt at that segment's exact "
-            "moment in the story - what the viewer should see while these "
-            "words are spoken, given what has JUST happened and what "
-            "happens NEXT - rather than at the passage in general.\n"
-            "Keep physical and spatial continuity between related "
-            "visuals: when consecutive segments happen in the same place "
-            "and situation, keep the same location, the same positions, "
-            "and the same circumstances in each prompt, and change them "
-            "only where the narration itself changes them - a move, an "
-            "entrance, a departure, or a change of time or weather.\n"
-            "Place people exactly where the narration places them. If "
-            "someone is outside a place - outside the tomb, on the shore, "
-            "at a distance, in the boat, before a closed door - keep them "
-            "outside it unless the narration says they entered. Never "
-            "move a scene indoors, into a city, or onto a road the "
-            "narration never mentions.\n"
-            "Depict each action in a physically plausible position for "
-            "that action: someone asleep lies down, someone praying "
-            "kneels or stands with head bowed, someone travelling is on "
-            "their feet on the way, someone addressing a crowd faces the "
-            "crowd.\n"
-            "Carry ongoing conditions across the related visuals - storm, "
-            "darkness, night, rain, wind, waves, crowds, water, fire, "
-            "heat, cold - and never introduce a condition that "
-            "contradicts one the narration still holds true: no calm "
-            "water in a violent storm, no bright daylight in a narrated "
-            "night, no empty street in a narrated crowd. Change a "
-            "condition only when the narration says it changed.\n"
+            "subject, setting, action, and atmosphere, and give the "
+            "camera framing that fits the moment (for example "
+            "close-up, medium shot, wide shot, or establishing shot). "
+            "Begin with 'Style: realistic.' Do not write a "
+            "stock-footage search query, narration, explanation, or "
+            "list.\n"
+            "The prompt must stand alone: SnapGenAI sees only the "
+            "prompt, so resolve every pronoun and vague reference to "
+            "the actual people the passage establishes. Write 'Jesus "
+            "and Peter climb into the boat', not 'they climb into the "
+            "boat', whenever the passage names who 'they' are. Only "
+            "name people the passage itself establishes - never guess "
+            "an identity.\n"
+            "Name Jesus explicitly whenever he appears in a scene, but "
+            "never describe his physical appearance - no face, hair, "
+            "build, or clothing details for him. Show him by his "
+            "actions, his position, and the people around him.\n"
+            "When Jesus is not in the scene, describe the other visible "
+            "people plainly and historically: who they are in the "
+            "story, and their period-appropriate appearance, clothing, "
+            "and role. For first-century Jewish people, use plausible "
+            "Levantine features and simple wool or linen tunics, "
+            "cloaks, head coverings, and sandals. Represent every other "
+            "group according to the identity the passage gives them.\n"
+            "Set every prompt in the biblical era: stone and mudbrick "
+            "buildings, ancient streets, fields, hillsides, shores, "
+            "boats, and period objects. Never show modern clothing, "
+            "hairstyles, buildings, roads, vehicles, technology, or any "
+            "modern environment.\n"
+            "Keep the prompt focused and concise - include only the "
+            "details that support the narrated event. Never invent "
+            "actions, people, objects, or outcomes the passage does not "
+            "give.\n"
+            "Carry continuity from the JUST BEFORE line: if the "
+            "previous sentence is in the same place and situation, keep "
+            "the same location, positions, and conditions here too, and "
+            "change them only where the narration itself changes them - "
+            "a move, an entrance, a departure, or a change of time or "
+            "weather. Never move the scene onto a shore, onto land, or "
+            "into a building, and never turn night into dawn or "
+            "daylight, unless the narration itself says so.\n"
+            "Place people exactly where the narration places them. "
+            "Where the narration does not say where someone is, the "
+            "passage above decides it: put each person where the "
+            "passage has them at this point in the story, and never "
+            "place a character where the passage contradicts - when "
+            "the passage keeps the people together in the boat, do "
+            "not move Jesus to the shore. If "
+            "someone is outside a place - outside the tomb, on the "
+            "shore, at a distance, in the boat, before a closed door - "
+            "keep them outside it unless the narration says they "
+            "entered. Never move a scene indoors, into a city, or onto "
+            "a road the narration never mentions.\n"
+            "Where the passage keeps Jesus apart from the group - "
+            "walking on the water, standing apart to pray, no longer "
+            "in the tomb - keep him apart for as long as the passage "
+            "does, and never move him into the boat, the house, or the "
+            "crowd unless the narration says he entered.\n"
+            "Depict each action in a physically plausible position: "
+            "someone asleep lies down, someone praying kneels or stands "
+            "with head bowed, someone travelling is on their feet on "
+            "the way, someone addressing a crowd faces the crowd.\n"
+            "Never introduce a condition that contradicts one the "
+            "narration still holds true: no calm water in a violent "
+            "storm, no bright daylight in a narrated night, no empty "
+            "street in a narrated crowd. Change a condition only when "
+            "the narration says it changed.\n"
             "Do not add details, people, objects, or events that change "
-            "the context of the scene the narration describes.\n"
-            + visual_rules
-            + "\n\nVISUAL STYLE\n"
+            "the context of the scene the narration describes.\n\n"
+            "VISUAL STYLE\n"
             + creative_directions
-            + "\n\nFINAL OUTPUT\n"
-            "Return exactly one object in \"visuals\" for every numbered "
-            "segment, in order. Each object's \"search_query\" must be a "
-            "distinct, complete SnapGenAI visual prompt for that segment, "
-            "including its specific scene, subject, action, setting, and "
-            "atmosphere. Consecutive prompts must also read as one "
-            "continuous story - same place, same people, same ongoing "
-            "conditions - wherever the narration keeps them there. The "
-            "object's \"visual_direction\" should repeat "
-            "that same segment shot in one concise sentence.\n"
-            + "\n\nTITLE RULES\n"
-        "The title must be clear, factual, and about what this "
-        "passage actually says or does. Write it in plain words.\n"
-        "- Name the event, teaching, saying, or story the passage "
-        "contains, using the passage's own language.\n"
-        "- NEVER invent a poetic, symbolic, or literary concept and "
-        "attach it to the passage. No metaphors, no invented 'of ...' "
-        "pairings, no made-up themes.\n"
-        "- NEVER add a theological claim the passage does not state. "
-        "Do not assert meaning, promise, or doctrine that is not in "
-        "the quoted text.\n"
-        "- Keep it short: a few words, not a sentence.\n"
-        "- Do NOT include the Scripture reference. It is added to the "
-        "title automatically; do not repeat it yourself.\n"
-        "Example - the passage below opens Matthew's genealogy of "
-        "Jesus. A correct title is \"The Genealogy of Jesus Christ\". "
-        "A WRONG title is \"Genealogy of Light\", which invents a "
-        "symbol the passage never mentions.\n"
-        + "\n\nSUMMARY RULES\n"
-        "The summary is one short sentence for the episode listing.\n"
-        "- State plainly what happens or is said in the passage.\n"
-        "- Do NOT repeat or restate the title, and do not reuse the "
-        "title's distinctive wording.\n"
-        "- Do NOT include the Scripture reference. It is already in "
-        "the title.\n"
-        "- Do NOT interpret, and do not add any claim the passage does "
-        "not state. Report the content; do not explain its theology.\n"
-        "- Keep it short and useful: one sentence, under 25 words.\n"
-        "\nAlso return:\n"
+            + "\n\n"
+            "CHANNEL VISUAL RULES\n"
+            + visual_rules
+            + "\n\n"
+            "FINAL OUTPUT\n"
+            "Return exactly ONE object with two fields, and nothing "
+            "else:\n"
+            "- \"search_query\": one distinct, complete SnapGenAI "
+            "visual prompt for THIS sentence only, including its "
+            "specific scene, subject, action, setting, atmosphere, and "
+            "camera framing.\n"
+            "- \"visual_direction\": that same shot in one concise "
+            "sentence.\n"
+        )
+
+        # A re-roll carries the checker's rejection forward, so the
+        # second attempt fixes the specific problem instead of
+        # resampling the same mistake.
+        if feedback:
+            prompt += (
+                "\n\nYOUR PREVIOUS ANSWER WAS REJECTED\n"
+                "An accuracy check read your earlier visual for this "
+                "sentence and rejected it for this reason:\n"
+                + feedback
+                + "\nWrite a NEW search_query that fixes exactly this "
+                "problem while still depicting only the marked "
+                "sentence. Do not repeat the rejected wording.\n"
+            )
+
+        return prompt
+
+
+    def build_visual_verification_prompt(
+        self,
+        scripture,
+        segments,
+        index,
+        query
+    ):
+        """
+        Builds the judge prompt for ONE visual against ONE sentence.
+
+        This is the accuracy check that lets generate() reject and
+        re-roll its own output: an independent second read that gets
+        the passage, the full telling, the marked sentence with its
+        neighbours, and the query written for it, and answers one
+        structured question - aligned, yes or no, and why not. The
+        criteria are the failure modes this channel has actually hit:
+        the wrong beat in the chronology, wrong agents, invented
+        locations, contradicted conditions, invented events, and
+        prompts that cannot stand alone.
+        """
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+
+        segment = segments[index]
+        before = (
+            segments[index - 1] if index > 0
+            else "(nothing - this sentence opens the narration)"
+        )
+        after = (
+            segments[index + 1] if index + 1 < len(segments)
+            else "(nothing - this sentence closes the narration)"
+        )
+
+        full_telling = "\n".join(
+            f"{position + 1}. {text}"
+            for position, text in enumerate(segments)
+        )
+
+        return (
+            "You are the accuracy checker for \""
+            + name
+            + "\". You read ONE visual prompt that was written for ONE "
+            "sentence of the narration, and you decide one thing: does "
+            "this visual depict exactly that sentence?\n\n"
+            "THE PASSAGE - THE AUTHORITY\n"
+            "The passage below is the exact "
+            + scripture["translation"]
+            + " text and the source of everything. The narration was "
+            "written from it and is fixed.\n\n"
+            "SCRIPTURE REFERENCE\n"
+            + scripture["reference"]
+            + " ("
+            + scripture["translation"]
+            + ")\n\n"
+            "THE PASSAGE\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\n"
+            "THE FULL NARRATION - CONTEXT\n"
+            + full_telling
+            + "\n\n"
+            "THIS SENTENCE - WHAT THE CLIP MUST SHOW\n"
+            f"THIS SENTENCE: {segment}\n"
+            f"  JUST BEFORE: {before}\n"
+            f"  JUST AFTER: {after}\n\n"
+            "THE VISUAL PROMPT IN QUESTION\n"
+            + str(query or "")
+            + "\n\n"
+            "JUDGE IT ON THESE POINTS ONLY\n"
+            "- Chronology: does it show THIS sentence's moment - not an "
+            "earlier beat, and not what happens later in the story?\n"
+            "- Agents: does the action THIS sentence narrates happen, "
+            "done by the people the passage has doing it? Never accept "
+            "one person's action credited to another. Other people the "
+            "passage has present in this scene may appear as "
+            "bystanders or witnesses - their presence is not a "
+            "failure.\n"
+            "- Location: are the people where the passage and the "
+            "narration put them at this point? Never show a location "
+            "the narration does not put them in - no invented shore, "
+            "land, or house, and no boarding shown when the narration "
+            "has someone already aboard.\n"
+            "- Conditions: does it contradict a condition still in "
+            "effect - storm, night, rain, crowd, being apart? A "
+            "contradiction is a failure.\n"
+            "- Invention: does it add people, actions, objects, or "
+            "outcomes the PASSAGE does not support? Details the "
+            "passage supports even without naming them in this exact "
+            "sentence - the setting, the other people present in this "
+            "scene, the weather - are legitimate context, not "
+            "invention.\n"
+            "- Self-containedness: does it name its people from the "
+            "passage instead of leaving an unresolved word like "
+            "'they'?\n\n"
+            "WHAT IS NOT A FAILURE\n"
+            "Do not reject for style, wording, atmosphere, camera "
+            "framing, or for carrying context the passage supports. "
+            "Reject only for one of the points above. If the visual "
+            "faithfully depicts this sentence and nothing on that "
+            "list fails, aligned must be true.\n\n"
+            "RETURN\n"
+            "Return exactly ONE object with two fields, and nothing "
+            "else:\n"
+            "- \"aligned\": true only if the visual faithfully depicts "
+            "THIS sentence on every point above; otherwise false.\n"
+            "- \"reason\": when aligned is false, one short sentence "
+            "naming exactly what is wrong with the visual; when "
+            "aligned is true, an empty string.\n"
+            "A reply that is not the JSON object above cannot be "
+            "parsed, and an unparsable reply counts as a rejection.\n"
+        )
+
+
+    def verify_visual(
+        self,
+        scripture,
+        segments,
+        index,
+        query
+    ):
+        """
+        Returns (aligned, reason) for one visual against its sentence.
+
+        Every failure path - a transport error, a reply with no JSON,
+        a verdict that is not plainly true - returns aligned=False, so
+        the only way a visual passes is an explicit parsed verdict of
+        true. Silence or noise can never read as approval.
+        """
+        prompt = self.build_visual_verification_prompt(
+            scripture,
+            segments,
+            index,
+            query
+        )
+
+        try:
+
+            response = self.llm.generate(
+                prompt,
+                response_format=VISUAL_VERIFICATION_SCHEMA
+            )
+
+        except Exception as error:
+
+            return (
+                False,
+                f"The accuracy check itself failed: {error}"
+            )
+
+        try:
+
+            verdict = self.parse_direction(response)
+
+        except ContentGenerationError:
+
+            return (
+                False,
+                "The accuracy check returned no parseable verdict."
+            )
+
+        if not isinstance(verdict, dict):
+
+            return (
+                False,
+                "The accuracy check returned no parseable verdict."
+            )
+
+        if verdict.get("aligned") is True:
+
+            return True, ""
+
+        reason = str(
+            verdict.get("reason") or ""
+        ).strip()
+
+        if not reason:
+            reason = (
+                "The visual does not faithfully depict the marked "
+                "sentence."
+            )
+
+        return False, reason
+
+
+    def build_metadata_prompt(
+        self,
+        scripture,
+        segments
+    ):
+        """
+        Builds the prompt for the episode's title, summary, and mood.
+
+        This is a separate, final call after the visuals are written, so
+        it never competes with visual direction and has no way to touch
+        a single spoken word or visual. It reads the passage and the
+        finished narration and returns only metadata.
+        """
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+        description = str(channel.get("description", ""))
+
+        full_telling = "\n".join(
+            f"{position + 1}. {text}"
+            for position, text in enumerate(segments)
+        )
+
+        return (
+            "You are the show-runner for \""
+            + name
+            + "\", a short-form channel that lets Scripture speak "
+            "for itself.\n\n"
+            "CRITICAL - YOU DO NOT WRITE THE SCRIPTURE\n"
+            "The passage below is the exact "
+            + scripture["translation"]
+            + " text, and it is the authority for this episode. Never "
+            "generate, paraphrase, rewrite, summarise, expand, correct, "
+            "or invent any part of the passage or the narration, and do "
+            "not echo them back. Return only the title, summary, and "
+            "mood described below.\n\n"
+            "CHANNEL DESCRIPTION\n"
+            + description
+            + "\n\nSCRIPTURE REFERENCE\n"
+            + scripture["reference"]
+            + " ("
+            + scripture["translation"]
+            + ")\n\n"
+            "THE PASSAGE\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\n"
+            "THE FIXED NARRATION\n"
+            + full_telling
+            + "\n\n"
+            "TITLE RULES\n"
+            "The title must be clear, factual, and about what this "
+            "passage actually says or does. Write it in plain words.\n"
+            "- Name the event, teaching, saying, or story the passage "
+            "contains, using the passage's own language.\n"
+            "- NEVER invent a poetic, symbolic, or literary concept and "
+            "attach it to the passage. No metaphors, no invented 'of ...' "
+            "pairings, no made-up themes.\n"
+            "- NEVER add a theological claim the passage does not state. "
+            "Do not assert meaning, promise, or doctrine that is not in "
+            "the quoted text.\n"
+            "- Keep it short: a few words, not a sentence.\n"
+            "- Do NOT include the Scripture reference. It is added to the "
+            "title automatically; do not repeat it yourself.\n"
+            "Example - the passage below opens Matthew's genealogy of "
+            "Jesus. A correct title is \"The Genealogy of Jesus Christ\". "
+            "A WRONG title is \"Genealogy of Light\", which invents a "
+            "symbol the passage never mentions.\n\n"
+            "SUMMARY RULES\n"
+            "The summary is one short sentence for the episode listing.\n"
+            "- State plainly what happens or is said in the passage.\n"
+            "- Do NOT repeat or restate the title, and do not reuse the "
+            "title's distinctive wording.\n"
+            "- Do NOT include the Scripture reference. It is already in "
+            "the title.\n"
+            "- Do NOT interpret, and do not add any claim the passage does "
+            "not state. Report the content; do not explain its theology.\n"
+            "- Keep it short and useful: one sentence, under 25 words.\n\n"
+            "FINAL OUTPUT\n"
+            "Return exactly one object with three fields, and nothing "
+            "else:\n"
             "- \"title\": a short, clear, factual title, following the "
             "TITLE RULES above. No Scripture reference.\n"
             "- \"summary\": one short factual sentence, following the "
@@ -663,6 +985,7 @@ class ContentGenerator(
             "Suspense must remain soft and atmospheric, never upbeat or "
             "aggressive.\n"
         )
+
 
     def parse_direction(
         self,
@@ -959,7 +1282,8 @@ class ContentGenerator(
 
     def build_narration_prompt(
         self,
-        scripture
+        scripture,
+        feedback=None
     ):
         """
         Builds the prompt that tells the passage.
@@ -1013,8 +1337,20 @@ class ContentGenerator(
             "iconic, memorable, emotionally important, or theologically "
             "important sayings verbatim from source_text, especially direct "
             "words of Jesus. Preserve the complete relevant saying from "
-            "source_text; never shorten it or paraphrase part of it. The "
-            "result must be a purposeful hybrid, "
+            "source_text; never shorten it or paraphrase part of it. "
+            "Preserve the exchanges that make someone act: when the "
+            "passage shows one character asking and another answering - "
+            "a request, a question, a command and its reply - keep "
+            "both sides of that exchange whenever the next action "
+            "depends on it, so the listener hears the ask before the "
+            "doing. Keep the condition a request carries: when someone "
+            "asks 'if it is you' or 'if you will', that condition is the "
+            "reason the answer matters, so it travels with the request "
+            "instead of being trimmed away. Keep the passage's own "
+            "agents: whoever the passage says does an action stays the "
+            "doer of it - never hand the action to another character "
+            "because that order of events seems tidier. "
+            "The result must be a purposeful hybrid, "
             "not a complete read-through and not a paraphrase of every line; "
             "your job is not to quote it back wholesale.\n"
             "When you use a direct quote, copy the complete relevant saying "
@@ -1037,6 +1373,15 @@ class ContentGenerator(
             + "\n\n"
             "NARRATION RULES\n"
             + rules
+            + "\n\nSPOKEN LENGTH\n"
+            f"Each sentence is spoken over one SnapGenAI clip of "
+            f"{_duration_target_seconds(self.config):g} seconds, and the "
+            f"cut between clips happens only at a completed sentence "
+            f"boundary. Keep every sentence to about "
+            f"{_max_words_per_sentence(self.config)} words or fewer so it "
+            f"fits that clip: when one thought would run longer, divide it "
+            f"into several shorter, natural, source-faithful sentences. A "
+            f"short sentence is never padded."
         )
 
         prompt += (
@@ -1070,7 +1415,164 @@ class ContentGenerator(
             "exactly as written - no heading, no label, no notes.\n"
         )
 
+        # A re-write carries the checker's issues forward, so the
+        # second telling fixes the specific accuracy problems instead
+        # of resampling the same ones.
+        if feedback:
+            prompt += (
+                "\n\nYOUR PREVIOUS NARRATION WAS REJECTED\n"
+                "An accuracy check compared your earlier narration "
+                "with the passage and found these problems:\n"
+                + feedback
+                + "\nWrite the telling again, fixing exactly these "
+                "problems while following every rule above.\n"
+            )
+
         return prompt
+
+    def build_narration_verification_prompt(
+        self,
+        scripture,
+        narration
+    ):
+        """
+        Builds the judge prompt that reads the finished telling against
+        the passage.
+
+        write_narration() uses it to catch the failure modes the
+        passage rules exist for - an action handed to the wrong agent,
+        a request's condition trimmed away, an exchange whose answer
+        erases its question - and re-writes with the issues as
+        feedback. The passage is quoted in full; the judge never
+        rewrites, only returns a verdict.
+        """
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+
+        return (
+            "You are the accuracy checker for \""
+            + name
+            + "\". You compare a written narration with the passage "
+            "it was told from, and you decide one thing: is the "
+            "narration accurate to the passage?\n\n"
+            "CRITICAL - YOU DO NOT REWRITE ANYTHING\n"
+            "You return only a verdict. The passage below is the "
+            "exact "
+            + scripture["translation"]
+            + " text and the authority.\n\n"
+            "SCRIPTURE REFERENCE\n"
+            + scripture["reference"]
+            + " ("
+            + scripture["translation"]
+            + ")\n\n"
+            "THE PASSAGE - THE AUTHORITY\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\n"
+            "THE NARRATION IN QUESTION\n"
+            + str(narration or "").strip()
+            + "\n\n"
+            "JUDGE IT ON THESE POINTS ONLY\n"
+            "- Agents: does every person in the narration act only as "
+            "the passage makes them act? Whoever the passage says does "
+            "an action stays the doer of it - an action handed to "
+            "another character is a failure, even when the events "
+            "themselves are all present.\n"
+            "- Conditions: is every condition a request or statement "
+            "carries kept with it - 'if it is you', 'if you will' - "
+            "instead of being trimmed away? A dropped condition that "
+            "changes what the answer means is a failure.\n"
+            "- Exchanges: when the passage shows one person asking and "
+            "another answering, and the action that follows depends on "
+            "it, does the narration keep both sides? An answer that "
+            "erases its question is a failure.\n"
+            "- Events and order: are the passage's events present and "
+            "in the passage's order? Anything the passage states but "
+            "the narration drops, and anything the narration has that "
+            "the passage never states - invented dialogue, motives, "
+            "feelings, events - is a failure.\n"
+            "- Quotations: is every verbatim quotation a complete, "
+            "faithful saying from the passage, attributed to the "
+            "passage's own speaker?\n"
+            "- Names and references: does the narration use the "
+            "passage's own names and titles, and never speak a "
+            "chapter, verse, or reference? An invented title is a "
+            "failure.\n\n"
+            "RETURN\n"
+            "Return exactly ONE object with two fields, and nothing "
+            "else:\n"
+            "- \"accurate\": true only if the narration passes every "
+            "point above; otherwise false.\n"
+            "- \"issues\": when accurate is false, a short list of the "
+            "exact problems, each one saying what is wrong; when "
+            "accurate is true, an empty string.\n"
+            "A reply that is not the JSON object above cannot be "
+            "parsed, and an unparsable reply counts as a rejection.\n"
+        )
+
+
+    def verify_narration(
+        self,
+        scripture,
+        narration
+    ):
+        """
+        Returns (accurate, issues) for one narration against the
+        passage. Same fail-closed contract as verify_visual: only an
+        explicit parsed true passes; anything else - transport error,
+        no JSON, missing field - is a rejection with a reason.
+        """
+        prompt = self.build_narration_verification_prompt(
+            scripture,
+            narration
+        )
+
+        try:
+
+            response = self.llm.generate(
+                prompt,
+                response_format=NARRATION_VERIFICATION_SCHEMA
+            )
+
+        except Exception as error:
+
+            return (
+                False,
+                f"The accuracy check itself failed: {error}"
+            )
+
+        try:
+
+            verdict = self.parse_direction(response)
+
+        except ContentGenerationError:
+
+            return (
+                False,
+                "The accuracy check returned no parseable verdict."
+            )
+
+        if not isinstance(verdict, dict):
+
+            return (
+                False,
+                "The accuracy check returned no parseable verdict."
+            )
+
+        if verdict.get("accurate") is True:
+
+            return True, ""
+
+        issues = str(
+            verdict.get("issues") or ""
+        ).strip()
+
+        if not issues:
+            issues = (
+                "The narration does not faithfully tell the passage."
+            )
+
+        return False, issues
+
 
     def parse_narration(
         self,
@@ -1171,25 +1673,69 @@ class ContentGenerator(
         scripture
     ):
         """
-        Calls the LLM once for narration. The WEBC passage is context
-        and authority only; it is never a narration fallback. The
-        returned narration is used as-is after transport parsing.
+        Calls the LLM for narration, then checks it against the
+        passage. The WEBC passage is context and authority only; it
+        is never a narration fallback. The returned narration is used
+        as-is after transport parsing. A narration the accuracy check
+        rejects is re-written with the issues as feedback, up to
+        verification_attempts times (set content_generation
+        .verify_narration to false to skip the check).
         """
-        prompt = self.build_narration_prompt(scripture)
+        verify = bool(
+            self.generation_config.get("verify_narration", True)
+        )
+        attempts = max(
+            1,
+            int(self.generation_config.get("verification_attempts", 3) or 1)
+        )
 
         self.log("Writing the narration...")
 
-        narration = self.parse_narration(
-            self.llm.generate(
-                prompt,
-                response_format=NARRATION_SCHEMA
-            )
-        )
+        feedback = None
+        narration = ""
 
-        narration = repair_source_word_punctuation(
-            scripture.get("text", ""),
-            narration,
-        )
+        for attempt in range(attempts):
+
+            prompt = self.build_narration_prompt(
+                scripture,
+                feedback=feedback
+            )
+
+            narration = self.parse_narration(
+                self.llm.generate(
+                    prompt,
+                    response_format=NARRATION_SCHEMA
+                )
+            )
+
+            narration = repair_source_word_punctuation(
+                scripture.get("text", ""),
+                narration,
+            )
+
+            if not verify:
+                break
+
+            accurate, issues = self.verify_narration(
+                scripture,
+                narration
+            )
+
+            if accurate:
+                break
+
+            if attempt + 1 < attempts:
+                self.log(
+                    f"Narration rejected ({issues}) - writing it "
+                    "again..."
+                )
+                feedback = issues
+            else:
+                self.log(
+                    f"Narration still rejected after {attempts} "
+                    f"attempts ({issues}) - keeping the last "
+                    "attempt."
+                )
 
         self.log(
             f"Narration ready ({len(narration.split())} words)."
@@ -1209,25 +1755,113 @@ class ContentGenerator(
         The narration is the telling this call is handed, never this
         call's own model output: the model here directs the visuals,
         the title, the summary, and the mood, and nothing else.
+
+        Visuals are directed one narration sentence at a time. Each
+        segment gets its own focused call - showing the full passage,
+        the full narration, and that sentence's immediate neighbours -
+        so every prompt depicts exactly its own beat instead of the
+        model collapsing the whole episode into a few repeated
+        establishing shots. Every finished visual is then checked
+        against its own sentence by a separate verification call; a
+        rejected visual is re-rolled with the checker's reason as
+        feedback, up to verification_attempts times, so the episode
+        ships checked visuals rather than first samples (set
+        content_generation.verify_visuals to false to skip the check).
+        A final separate call writes the title, summary, and mood.
+        assemble_content() then pairs each collected visual with its
+        own sentence, in order.
         """
-        prompt = self.build_prompt(
+        self.log(
+            f"Generating {len(segments)} visuals, one call per "
+            "sentence..."
+        )
+
+        verify = bool(
+            self.generation_config.get("verify_visuals", True)
+        )
+        attempts = max(
+            1,
+            int(self.generation_config.get("verification_attempts", 3) or 1)
+        )
+
+        visuals = []
+        for index in range(len(segments)):
+            feedback = None
+            parsed = {}
+
+            for attempt in range(attempts):
+
+                prompt = self.build_segment_prompt(
+                    scripture,
+                    segments,
+                    index,
+                    feedback=feedback
+                )
+
+                response = self.llm.generate(
+                    prompt,
+                    response_format=VISUAL_SCHEMA
+                )
+
+                parsed = self.parse_direction(response)
+                if not isinstance(parsed, dict):
+                    parsed = {}
+
+                if not verify:
+                    break
+
+                aligned, reason = self.verify_visual(
+                    scripture,
+                    segments,
+                    index,
+                    str(parsed.get("search_query", ""))
+                )
+
+                if aligned:
+                    break
+
+                if attempt + 1 < attempts:
+                    self.log(
+                        f"Sentence {index + 1}: rejected ({reason}) - "
+                        "re-rolling..."
+                    )
+                    feedback = reason
+                else:
+                    self.log(
+                        f"Sentence {index + 1}: still rejected after "
+                        f"{attempts} attempts ({reason}) - keeping the "
+                        "last attempt."
+                    )
+
+            visuals.append(parsed)
+
+        self.log("Generating metadata (title, summary, mood)...")
+
+        metadata_prompt = self.build_metadata_prompt(
             scripture,
             segments
         )
 
-        self.log(
-            "Generating visual direction..."
+        metadata_response = self.llm.generate(
+            metadata_prompt,
+            response_format=METADATA_SCHEMA
         )
 
-        response = self.llm.generate(
-            prompt,
-            response_format=build_direction_schema(len(segments))
-        )
+        metadata = self.parse_direction(metadata_response)
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        direction = {
+            "title": metadata.get("title", ""),
+            "summary": metadata.get("summary", ""),
+            "mood": metadata.get("mood", ""),
+            "visuals": visuals,
+        }
 
         return self.assemble_content(
             scripture,
             segments,
-            self.parse_direction(response),
+            direction,
             narration
         )
 

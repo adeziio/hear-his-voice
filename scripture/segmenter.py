@@ -5,29 +5,148 @@ import re
 # segment is never touched: the segmenter only chooses boundaries, so
 # whatever text it is given comes back word for word, ready to speak
 # and caption exactly as it was written.
+#
+# The boundary is the whitespace that closes one sentence and opens the
+# next. Splitting there - rather than before the punctuation - keeps the
+# terminal mark with the sentence it belongs to.
 SENTENCE_SPLIT = re.compile(
-    r"(?<=[.!?…”’\"])\s+"
+    r"(?:(?<=[.!?…])|(?<=[.!?…][\"'”’)\]]))"
+    r"\s+"
+    r"(?=[\"'“”(\[]*\s*[A-Z0-9])"
 )
 
 
-# A long sentence can still be broken at its own punctuation - commas,
-# semicolons, colons, and dashes - so one visual never covers an entire
-# verse. Splitting after the punctuation keeps the clause lossless:
-# rejoining the clauses with a single space reproduces the sentence.
+# A sentence that would overrun one clip is divided at its own
+# punctuation - commas, semicolons, colons, and dashes - into the
+# shorter natural sentences the task asks for. Splitting after the
+# punctuation keeps the clause lossless: rejoining the clauses with a
+# single space reproduces the sentence.
 CLAUSE_SPLIT = re.compile(
     r"(?<=[,;:])\s+|(?<=\s[-–—])\s+"
 )
 
 
-def split_sentences(text):
+def _protected_spans(text):
+    """
+    Character-index (start, end) ranges that fall inside a quotation.
+
+    Straight and curly double quotes and straight single quotes open and
+    close a quotation, while an apostrophe inside a word (Don't,
+    Jesus's) never does. The segmenter keeps its cuts out of these
+    ranges so a line of spoken dialogue is not broken in half between
+    two visuals - "Save us, Lord! We are dying!" is one saying, not
+    three.
+    """
+    spans = []
+    quote = None
+    start = None
+
+    for index, char in enumerate(text):
+
+        if char in ('"', "“", "”"):
+
+            if char == "”" or quote == char:
+
+                if start is not None:
+
+                    spans.append((start, index + 1))
+
+                quote = None
+                start = None
+
+            elif quote is None:
+
+                quote = char
+                start = index
+
+            continue
+
+        if char == "'":
+
+            previous = text[index - 1] if index else ""
+            following = (
+                text[index + 1]
+                if index + 1 < len(text)
+                else ""
+            )
+            is_apostrophe = previous.isalnum() and following.isalnum()
+
+            if not is_apostrophe:
+
+                if quote == "'":
+
+                    if start is not None:
+
+                        spans.append((start, index + 1))
+
+                    quote = None
+                    start = None
+
+                elif quote is None:
+
+                    quote = "'"
+                    start = index
+
+    if quote is not None and start is not None:
+
+        spans.append((start, len(text)))
+
+    return spans
+
+
+def _split_outside_quotes(text, pattern, protected):
+    """
+    Splits text at every match of pattern whose cut sits outside the
+    protected (quoted) ranges, leaving the words inside a quotation
+    intact.
+
+    Matches are consumed exactly as re.split would, so the pieces still
+    rejoin into the original text.
+    """
+    pieces = []
+    last = 0
+
+    for match in pattern.finditer(text):
+
+        cut = match.start()
+
+        if any(
+            begin <= cut < end
+            for begin, end in protected
+        ):
+            continue
+
+        pieces.append(text[last:cut])
+        last = match.end()
+
+    pieces.append(text[last:])
+
+    return pieces
+
+
+def split_sentences(text, protected=None):
     """
     Splits narration text into sentence-sized pieces at existing
     punctuation. No word is added, removed, or reordered - the
     concatenation of the result is the original text.
+
+    When ``protected`` is given - the (start, end) ranges of a
+    quotation - no cut is made inside those ranges, so a quoted saying
+    stays whole. With no ``protected`` the behaviour is unchanged.
     """
-    pieces = SENTENCE_SPLIT.split(
-        str(text).strip()
-    )
+    value = str(text).strip()
+
+    if protected:
+
+        pieces = _split_outside_quotes(
+            value,
+            SENTENCE_SPLIT,
+            protected
+        )
+
+    else:
+
+        pieces = SENTENCE_SPLIT.split(value)
 
     return [
         piece.strip()
@@ -36,28 +155,45 @@ def split_sentences(text):
     ]
 
 
-def split_clauses(sentence, max_words):
+def split_clauses(sentence, max_words, protected=None):
     """
     Breaks one sentence into shorter clauses when it is too long to sit
-    on a single visual.
+    on a single clip.
 
     Only punctuation that is already in the text is used as a break, and
     the break happens after it, so no word or mark is added, removed,
-    or moved.
+    or moved. When ``protected`` is given, no break is made inside those
+    quoted ranges.
+
+    A clause that is still longer than ``max_words`` on its own cannot
+    be divided without inventing a boundary the text does not have, so
+    it is returned whole rather than rewritten.
     """
     text = str(sentence).strip()
 
-    if max_words <= 0:
+    if (
+        max_words is None
+        or max_words <= 0
+        or len(text.split()) <= max_words
+    ):
 
         return [text]
 
-    if len(text.split()) <= max_words:
+    if protected:
 
-        return [text]
+        clauses = _split_outside_quotes(
+            text,
+            CLAUSE_SPLIT,
+            protected
+        )
+
+    else:
+
+        clauses = CLAUSE_SPLIT.split(text)
 
     clauses = [
         clause.strip()
-        for clause in CLAUSE_SPLIT.split(text)
+        for clause in clauses
         if clause.strip()
     ]
 
@@ -95,135 +231,50 @@ def split_clauses(sentence, max_words):
     return chunks
 
 
-def build_visual_segments(
-    text,
-    target_segments,
-    clause_words=12,
-    max_words_per_segment=26,
-):
+def build_sentence_segments(text, max_words=None):
     """
     Breaks the narration into the spoken segments that each get their
-    own SnapGenAI visual prompt and visual direction.
+    own SnapGenAI visual prompt and clip: one segment per completed
+    narration sentence, in the original order.
 
-    The text is only ever cut at punctuation that is already in it.
-    Joining the result with single spaces reproduces the input exactly,
-    so the narration and captions still speak what they were given,
-    word for word.
+    `max_words` is the most words one sentence may hold, because a
+    sentence is spoken over exactly one clip and that clip is only
+    `max_words` long. It is a ceiling, never a quota: a sentence shorter
+    than the ceiling is kept whole and never padded, and only a sentence
+    that would overrun the clip is divided - at its own punctuation, into
+    the shorter natural sentences the task asks for, each of which then
+    gets its own visual.
+
+    Only punctuation already in the text is used as a boundary, and the
+    break happens after it, so joining the result with single spaces
+    reproduces the input exactly: the narration and captions still speak
+    every word they were given, in order.
+
+    Cuts are kept out of quotations, so a spoken saying - a cry and the
+    reply it draws - stays whole inside one segment.
     """
-    atoms = []
+    value = str(text).strip()
 
-    for sentence in split_sentences(text):
-
-        atoms.extend(
-            split_clauses(
-                sentence,
-                clause_words
-            )
-        )
-
-    if not atoms:
-
-        return []
-
-    target_segments = max(
-        1,
-        int(target_segments)
-    )
+    # Quoted ranges are located in the string actually being split: a
+    # range found in the whole narration would point at the wrong
+    # characters once that narration is cut into sentences.
+    protected = _protected_spans(value)
 
     segments = []
 
-    if len(atoms) <= target_segments:
+    for sentence in split_sentences(value, protected):
 
-        # Already one visual per clause: nothing to group.
-        segments = list(atoms)
+        # Each sentence is its own string, so its quotations are found
+        # in it - not in the narration it came from.
+        sentence_spans = _protected_spans(sentence)
 
-    else:
-
-        # Otherwise pack clauses together, keeping every segment
-        # inside the word budget so a single visual never covers a
-        # whole verse.
-        total_words = sum(
-            len(atom.split())
-            for atom in atoms
-        )
-
-        budget = max(
-            1,
-            total_words // target_segments
-        )
-
-        current = []
-        current_words = 0
-
-        for atom in atoms:
-
-            atom_words = len(atom.split())
-
-            candidate_words = (
-                current_words + atom_words
-            )
-
-            starts_new = bool(
-                current
-                and (
-                    current_words >= budget
-                    or candidate_words > max_words_per_segment
-                )
-            )
-
-            if starts_new:
-
-                segments.append(" ".join(current))
-                current = [atom]
-                current_words = atom_words
-
-            else:
-
-                current.append(atom)
-                current_words = candidate_words
-
-        if current:
-
-            segments.append(" ".join(current))
-
-
-    # A clause can still be very short - a bare "Amen." closing a
-    # prayer, or a one-word reply. Alone that would give the viewer a
-    # single-word visual, so any such fragment is folded into the
-    # segment beside it. Joining with one space keeps the text itself
-    # unchanged - only the boundaries move.
-    minimum_words = 3
-
-    while len(segments) > 1:
-
-        shortest = min(
-            range(len(segments)),
-            key=lambda index: len(
-                segments[index].split()
+        segments.extend(
+            split_clauses(
+                sentence,
+                max_words,
+                sentence_spans
             )
         )
-
-        if (
-            len(segments[shortest].split())
-            >= minimum_words
-        ):
-
-            break
-
-        if shortest > 0:
-
-            segments[shortest - 1] = (
-                f"{segments[shortest - 1]} "
-                f"{segments[shortest]}"
-            )
-
-        else:
-
-            segments[1] = (
-                f"{segments[0]} {segments[1]}"
-            )
-
-        del segments[shortest]
 
     return segments
 

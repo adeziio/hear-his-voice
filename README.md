@@ -206,11 +206,13 @@ The project is **configuration-driven**.
 `app.json` → `shorts.target_duration_seconds` is the narration's target
 duration, not a promise about the final episode length. The generated
 narration is the source of truth for the actual episode duration and visual
-timing:
+timing; each visual segment holds about one SnapGenAI clip of speech, and the
+clip length comes from `ai_models.json` →
+`models.video_model.snapgenai.duration_target`:
 
 ```text
 expected_duration = generated_narration_words ÷ words_per_second
-visual_count      ≈ expected_duration ÷ 8 seconds
+visual_count      ≈ expected_duration ÷ duration_target seconds
 ```
 
 Visual segments are grouped at existing sentence/clause boundaries, keeping

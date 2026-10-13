@@ -1,7 +1,7 @@
 {
     "models": {
         "language_model": {
-            "model": "qwen3:8b",
+            "model": "qwen3:14b",
             "thinking": false,
             "timeout": 900,
             "options": {
