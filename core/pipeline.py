@@ -322,8 +322,13 @@ class HearHisVoicePipeline:
             text=narration,
         )
 
+        # One visual per STORY BEAT, not one per sentence: consecutive
+        # narration units that form one moment share a clip, and the
+        # exact narration text of each group becomes that visual's
+        # sentence. Falls back to one-per-sentence when grouping is
+        # switched off or the model never returns a usable partition.
         segments = (
-            self.content_generator.build_segments(
+            self.content_generator.build_story_beat_segments(
                 narration_script
             )
         )

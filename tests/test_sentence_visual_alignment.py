@@ -16,6 +16,7 @@ rules the prompts are held to.
 """
 
 import json
+import re
 
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from ai.content_generator import (
     METADATA_SCHEMA,
     NARRATION_SCHEMA,
     NARRATION_VERIFICATION_SCHEMA,
+    SEGMENT_GROUPING_SCHEMA,
     VISUAL_SCHEMA,
     VISUAL_VERIFICATION_SCHEMA,
 )
@@ -56,6 +58,117 @@ STORM_NARRATION = (
 )
 
 
+# The narration of the generated episode media/output/shorts/001, kept
+# verbatim as the regression case for story-beat grouping: that episode
+# shipped one visual per narration unit (15 visuals, no merges) even
+# though several consecutive pairs formed one beat and fit the clip.
+EPISODE_001_NARRATION = (
+    "Jesus sent the crowds away and told his disciples to get into a "
+    "boat and go ahead of him. He went up onto a mountain by himself "
+    "to pray. As evening came, he was alone there. But the boat was "
+    "now in the middle of the sea, struggling against the waves as "
+    "the wind blew strongly against them. In the fourth watch of the "
+    "night, Jesus came walking on the water toward them. When the "
+    "disciples saw him, they were terrified and cried out, thinking "
+    "it was a ghost. Immediately, Jesus spoke to them, saying, "
+    "“Cheer up! It is I! Don’t be afraid.” Peter "
+    "answered, “Lord, if it is you, command me to come to you "
+    "on the water.” He said, “Come!” Peter stepped "
+    "down from the boat and walked on the water toward Jesus. But "
+    "when he saw how strong the wind was, he became afraid and began "
+    "to sink. He cried out, “Lord, save me!” Immediately "
+    "Jesus reached out his hand, took hold of him, and said, "
+    "“You of little faith, why did you doubt?” When they "
+    "got into the boat, the wind ceased. Those in the boat came and "
+    "worshiped him, saying, “You are truly the Son of God!”"
+)
+
+
+# Episode 001's REGENERATED content (the story-beat grouping run),
+# kept verbatim as the regression case for visual accuracy: the
+# grouping worked - 12 visuals from 15 units - but three shipped
+# prompts put the scene at odds with the passage: the crowd shown
+# boarding the boat for the sentence that sends the crowd away, the
+# disciples shown climbing aboard from shore when the passage has
+# them already at sea, and Jesus reduced to "a solitary figure".
+EPISODE_001_REGENERATED_NARRATION = (
+    "Jesus sent the crowds away and told his disciples to get into "
+    "the boat and go ahead of him. He went up onto a mountain by "
+    "himself to pray. When evening came, he was alone there. But "
+    "the boat was now in the middle of the sea, struggling against "
+    "the waves as the wind blew strongly against them. In the "
+    "fourth watch of the night, Jesus came walking on the water "
+    "toward them. The "
+    "disciples saw him and were terrified, crying out in fear, "
+    "thinking it was a ghost. Immediately Jesus spoke to them, "
+    "saying, 'Cheer up! It is I! Don’t be afraid.' Peter answered, "
+    "'Lord, if it is you, command me to come to you on the waters.' "
+    "He said, 'Come!' Peter stepped down from the boat and walked on "
+    "the water toward Jesus. But when he saw how strong the wind "
+    "was, he became afraid and began to sink. He cried out, 'Lord, "
+    "save me!' Immediately Jesus reached out his hand, took hold of "
+    "him, and said, 'You of little faith, why did you doubt?' When "
+    "they got into the boat, the wind ceased. Those in the boat came "
+    "and worshiped him, saying, 'You are truly the Son of God!'"
+)
+
+
+# The 12 shipped sentence-visual pairs, as episode 001's content.json
+# holds them.
+EPISODE_001_SHIPPED_SEGMENTS = (
+    "Jesus sent the crowds away and told his disciples to get into "
+    "the boat and go ahead of him.",
+    "He went up onto a mountain by himself to pray. When evening "
+    "came, he was alone there.",
+    "But the boat was now in the middle of the sea, struggling "
+    "against the waves as the wind blew strongly against them.",
+    "In the fourth watch of the night, Jesus came walking on the "
+    "water toward them.",
+    "The disciples saw him and were terrified, crying out in fear, "
+    "thinking it was a ghost.",
+    "Immediately Jesus spoke to them, saying, 'Cheer up! It is I! "
+    "Don’t be afraid.'",
+    "Peter answered, 'Lord, if it is you, command me to come to you "
+    "on the waters.' He said, 'Come!'",
+    "Peter stepped down from the boat and walked on the water toward "
+    "Jesus.",
+    "But when he saw how strong the wind was, he became afraid and "
+    "began to sink. He cried out, 'Lord, save me!'",
+    "Immediately Jesus reached out his hand, took hold of him, and "
+    "said, 'You of little faith, why did you doubt?'",
+    "When they got into the boat, the wind ceased.",
+    "Those in the boat came and worshiped him, saying, 'You are "
+    "truly the Son of God!'",
+)
+
+
+# The two prompts episode 001 shipped against the passage, verbatim.
+EPISODE_001_BAD_CROWD_BOARDING = (
+    "Style: realistic. A group of disciples are gathering on a rocky "
+    "shoreline at dusk, helping people from a crowd to climb into a "
+    "wooden boat as Jesus stands nearby, watching them with calm "
+    "authority. The sky is painted in deep indigo and gold, the sea "
+    "gently lapping against the shore. Medium shot, focusing on the "
+    "disciples' hands assisting others while Jesus remains slightly "
+    "apart, facing them but not yet moving toward the boat."
+)
+
+EPISODE_001_BAD_UNNAMED_JESUS = (
+    "Style: realistic. A wide shot of a solitary figure standing "
+    "atop a rocky hillside at dusk, facing away from the viewer with "
+    "arms raised in prayer, the sky transitioning to deep indigo as "
+    "the first stars appear above, soft light casting long shadows "
+    "across the landscape."
+)
+
+EPISODE_001_BAD_SHORE_BOARDING = (
+    "Style: realistic. A medium shot of disciples climbing into a "
+    "small wooden boat on the shore of a stormy lake at night, their "
+    "faces illuminated by the faint light of distant torches, as the "
+    "wind begins to die down and the water grows calm behind them."
+)
+
+
 class StubLLM:
     """
     Stands in for the Ollama provider so generation runs offline.
@@ -73,7 +186,8 @@ class StubLLM:
         queries=None,
         verifications=None,
         narration_verifications=None,
-        verification_reply=None
+        verification_reply=None,
+        grouping_replies=None
     ):
 
         self.narration = narration
@@ -88,12 +202,15 @@ class StubLLM:
         # When set, returned verbatim instead of a verdict object -
         # used to cover the fail-closed path on an unparseable reply.
         self.verification_reply = verification_reply
+        # Scripted story-beat partitions, consumed in call order.
+        self.grouping_replies = list(grouping_replies or [])
         self.prompts = []
         self.visual_prompts = []
         self.metadata_prompts = []
         self.narration_prompts = []
         self.verification_prompts = []
         self.narration_verification_prompts = []
+        self.grouping_prompts = []
         self.visual_calls = 0
 
     def generate(
@@ -103,6 +220,31 @@ class StubLLM:
     ):
 
         self.prompts.append(prompt)
+
+        # Grouping calls come first of all: a story-beat call must
+        # never consume a verdict or a visual reply. When the scripted
+        # replies run out, every unit gets its own visual - the safe
+        # default a test that is not about grouping expects.
+        if response_format is SEGMENT_GROUPING_SCHEMA:
+
+            self.grouping_prompts.append(prompt)
+
+            if self.grouping_replies:
+
+                return self.grouping_replies.pop(0)
+
+            numbers = re.findall(r"(?m)^(\d+)\. ", prompt)
+            count = max(
+                (int(number) for number in numbers),
+                default=1,
+            )
+
+            return {
+                "groups": [
+                    [unit]
+                    for unit in range(1, count + 1)
+                ]
+            }
 
         # Verification calls share the transport but not the contract:
         # they must be routed before any generation call, or a check
@@ -195,7 +337,8 @@ def make_config(
     words_per_second=2.8,
     verify_visuals=True,
     verify_narration=True,
-    verification_attempts=3
+    story_beat_grouping=True,
+    grouping_attempts=3
 ):
     """
     A configuration holding only the keys the generator reads, so each test
@@ -216,7 +359,8 @@ def make_config(
                 "words_per_second": words_per_second,
                 "verify_visuals": verify_visuals,
                 "verify_narration": verify_narration,
-                "verification_attempts": verification_attempts
+                "story_beat_grouping": story_beat_grouping,
+                "grouping_attempts": grouping_attempts
             },
             "visual_rules": [
                 "Generate exactly one distinct SnapGenAI visual prompt "
@@ -753,7 +897,8 @@ def test_the_prompt_requires_historical_setting_and_character_context():
 
     # Jesus is named, never described.
     assert "Name Jesus explicitly whenever he appears" in prompt
-    assert "never describe his physical appearance" in prompt
+    assert "never an unnamed stand-in" in prompt
+    assert "Never describe his physical appearance" in prompt
 
     # When he is absent, the other people are described historically.
     assert "describe the other visible" in prompt
@@ -981,15 +1126,16 @@ def test_a_rejected_visual_is_re_rolled_with_the_rejection_reason():
     assert "Shot 2." in content["visuals"][0]["search_query"]
 
 
-def test_attempts_are_capped_and_the_last_attempt_is_kept():
+def test_the_re_roll_loop_runs_until_the_checker_approves():
     """
-    A segment the checker never approves does not loop forever: the
-    attempt cap holds, the reason is logged, and the episode still
-    ships one visual for the sentence.
+    A rejected visual never ships. There is no attempt cap: the loop
+    re-rolls for as long as the checker keeps rejecting - seven
+    rejections in a row (well past any former cap) must produce
+    eight visual calls, and only the approved eighth query ships.
     """
     narration = "Jesus stilled the storm."
     generator, stub = make_generator(
-        llm=StubLLM(verifications=[False, False, False])
+        llm=StubLLM(verifications=[False] * 7 + [True])
     )
 
     segments = generator.build_segments({"text": narration})
@@ -1000,9 +1146,17 @@ def test_attempts_are_capped_and_the_last_attempt_is_kept():
         narration=narration,
     )
 
-    assert stub.visual_calls == 3
-    assert len(stub.verification_prompts) == 3
+    assert stub.visual_calls == 8
+    assert len(stub.verification_prompts) == 8
+
+    # Every re-roll carried the rejection forward, and only the
+    # checker-approved attempt is what shipped.
+    assert all(
+        "YOUR PREVIOUS ANSWER WAS REJECTED" in prompt
+        for prompt in stub.visual_prompts[1:]
+    )
     assert len(content["visuals"]) == 1
+    assert "Shot 8." in content["visuals"][0]["search_query"]
 
 
 def test_verification_can_be_switched_off():
@@ -1086,4 +1240,461 @@ def test_a_verdict_we_cannot_parse_counts_as_a_rejection():
 
     assert aligned is False
     assert reason
+
+
+def test_story_beat_grouping_merges_one_moment_into_one_visual():
+    """
+    The storm and the cry it draws belong on one screen: consecutive
+    narration units that form one moment share a single visual, and
+    the narration itself is carried over word for word.
+    """
+    generator, stub = make_generator(
+        llm=StubLLM(
+            grouping_replies=[{"groups": [[1, 2], [3]]}]
+        ),
+        # Ceiling of 32 words, so unit 1 (22 words) may share a clip
+        # with unit 2 - the merge is a real choice, not one the
+        # duration cap would split straight back apart.
+        words_per_second=4,
+    )
+
+    segments = generator.build_story_beat_segments(
+        {"text": STORM_NARRATION}
+    )
+
+    assert len(stub.grouping_prompts) == 1
+    assert len(segments) == 2
+
+    # Compare against the quote-protected units, which are what the
+    # grouping actually operates on: the cry stays whole in unit 2.
+    ceiling = _max_words_per_sentence(generator.config)
+    units = build_sentence_segments(STORM_NARRATION, ceiling)
+
+    assert segments[0] == f"{units[0]} {units[1]}"
+    assert segments[1] == units[2]
+
+    # Complete coverage: the segments ARE the narration, with nothing
+    # omitted, duplicated, or rewritten.
+    assert " ".join(segments) == STORM_NARRATION
+
+
+def test_a_broken_grouping_is_rejected_and_re_rolled_with_the_reason():
+    """
+    A partition that drops a unit can never be shipped: it is
+    rejected, the reason goes back in the next prompt, and the fixed
+    partition takes its place.
+    """
+    generator, stub = make_generator(
+        llm=StubLLM(
+            grouping_replies=[
+                # Unit 2 is missing - an unusable partition.
+                {"groups": [[1], [3]]},
+                {"groups": [[1, 2], [3]]},
+            ]
+        ),
+        words_per_second=4,
+    )
+
+    segments = generator.build_story_beat_segments(
+        {"text": STORM_NARRATION}
+    )
+
+    assert len(stub.grouping_prompts) == 2
+
+    rejected = stub.grouping_prompts[1]
+    assert "YOUR PREVIOUS GROUPING WAS REJECTED" in rejected
+    assert "missing unit(s) [2]" in rejected
+    assert len(segments) == 2
+
+
+def test_unusable_grouping_falls_back_to_one_visual_per_sentence():
+    """
+    Fail-safe, not fail-silent: when no attempt returns a usable
+    partition, the old one-visual-per-sentence cut is used - always
+    correct, even if less clever.
+    """
+    generator, stub = make_generator(
+        llm=StubLLM(
+            grouping_replies=[
+                "not json",
+                {"groups": [[1, 9]]},
+                {"groups": "everything"},
+            ]
+        )
+    )
+
+    segments = generator.build_story_beat_segments(
+        {"text": STORM_NARRATION}
+    )
+
+    assert len(stub.grouping_prompts) == 3
+    assert segments == generator.build_segments(
+        {"text": STORM_NARRATION}
+    )
+    assert len(segments) == 3
+
+
+def test_grouping_never_exceeds_the_clip_spoken_ceiling():
+    """
+    duration_target is the MAXIMUM spoken length of a group, never a
+    duration to fill: a group built beyond it is cut back at unit
+    boundaries - never inside a unit - and every word survives.
+    """
+    generator, stub = make_generator(
+        llm=StubLLM(
+            grouping_replies=[{"groups": [[1, 2, 3]]}]
+        )
+    )
+
+    segments = generator.build_story_beat_segments(
+        {"text": STORM_NARRATION}
+    )
+
+    ceiling = _max_words_per_sentence(generator.config)
+
+    assert len(stub.grouping_prompts) == 1
+    assert len(segments) == 2
+    assert all(
+        len(segment.split()) <= ceiling
+        for segment in segments
+    )
+    assert " ".join(segments) == STORM_NARRATION
+
+
+def test_story_beat_grouping_can_be_switched_off():
+    generator, stub = make_generator(
+        llm=StubLLM(),
+        story_beat_grouping=False,
+    )
+
+    segments = generator.build_story_beat_segments(
+        {"text": STORM_NARRATION}
+    )
+
+    assert not stub.grouping_prompts
+    assert len(segments) == 3
+
+
+def test_the_grouping_prompt_names_the_units_the_ceiling_and_the_feedback():
+    generator, _ = make_generator()
+    units = build_sentence_segments(STORM_NARRATION, 22)
+
+    prompt = generator.build_grouping_prompt(
+        {
+            "text": STORM_NARRATION,
+            "reference": "Mark 4:35-41",
+            "translation": "WEBC",
+        },
+        units,
+        22,
+        feedback="missing unit(s) [2].",
+    )
+
+    assert "YOUR PREVIOUS GROUPING WAS REJECTED" in prompt
+    assert "missing unit(s) [2]" in prompt
+    assert f"1. {units[0]}" in prompt
+    assert f"1 to {len(units)} must appear EXACTLY ONCE" in prompt
+    assert "MERGE FIRST" in prompt
+    assert "22 words or fewer" in prompt
+    assert STORM_NARRATION in prompt
+
+
+def test_an_all_single_sentence_grouping_is_re_rolled_when_merging_was_possible():
+    """
+    The exact failure this feature exists for: a partition with one
+    unit per visual is rejected while some pair of units would have
+    fit one clip, and the re-roll carries the reason.
+    """
+    generator, stub = make_generator(
+        llm=StubLLM(
+            grouping_replies=[
+                {"groups": [[1], [2], [3]]},
+                {"groups": [[1, 2], [3]]},
+            ]
+        ),
+        # Ceiling of 32 words: units 1 and 2 (22 + 10) could share.
+        words_per_second=4,
+    )
+
+    segments = generator.build_story_beat_segments(
+        {"text": STORM_NARRATION}
+    )
+
+    assert len(stub.grouping_prompts) == 2
+    assert "Every group held a single unit" in stub.grouping_prompts[1]
+    assert len(segments) == 2
+
+
+def test_single_sentence_groups_are_kept_when_no_pair_fits_one_clip():
+    """
+    The merge rule never overrules the duration ceiling: when every
+    consecutive pair would overrun the clip, one visual per unit is
+    the correct cut and stands on the first attempt.
+    """
+    narration = (
+        "The disciples gathered the fragments that remained and "
+        "filled twelve baskets with the pieces from the meal that "
+        "day. Then he sent the crowds away and went up the mountain "
+        "alone to pray while the evening came upon the shore. "
+        "The boat was out in the middle of the sea by then, beaten "
+        "by the waves as the wind drove against it in the night."
+    )
+
+    generator, stub = make_generator(
+        llm=StubLLM(
+            grouping_replies=[
+                {"groups": [[1], [2], [3], [4]]}
+            ]
+        )
+    )
+
+    segments = generator.build_story_beat_segments(
+        {"text": narration}
+    )
+
+    assert len(stub.grouping_prompts) == 1
+    assert len(segments) == 4
+    assert " ".join(segments) == narration
+
+
+def test_the_real_episode_units_and_their_fitting_pairs():
+    """
+    Regression for the shipped episode: its 15 narration units and the
+    exact set of consecutive pairs whose combined spoken length fits
+    the duration-derived ceiling - the mountain prayer + evening
+    (17 words), Peter's request + "Come!" (19 words), the short
+    "Come!" + stepping out (16 words), and the sinking + "Lord, save
+    me!" (22 words). Every other boundary legally exceeds the clip.
+    """
+    config = make_config()
+    max_words = _max_words_per_sentence(config)
+    units = build_sentence_segments(EPISODE_001_NARRATION, max_words)
+
+    assert len(units) == 15
+
+    fitting = {
+        (position, position + 1): (
+            len(units[position - 1].split())
+            + len(units[position].split())
+        )
+        for position in range(1, len(units))
+        if (
+            len(units[position - 1].split())
+            + len(units[position].split())
+            <= max_words
+        )
+    }
+
+    assert fitting == {
+        (2, 3): 17,
+        (8, 9): 19,
+        (9, 10): 16,
+        (11, 12): 22,
+    }
+
+
+def test_the_grouping_prompt_lists_every_pair_that_fits_one_clip():
+    """
+    The prompt hands the model the code-computed candidates: every
+    pair that fits one clip is listed for an explicit decision, and a
+    pair that would overrun the ceiling is never offered.
+    """
+    generator, _ = make_generator()
+    config = make_config()
+    max_words = _max_words_per_sentence(config)
+    units = build_sentence_segments(EPISODE_001_NARRATION, max_words)
+
+    prompt = generator.build_grouping_prompt(
+        {"text": EPISODE_001_NARRATION},
+        units,
+        max_words,
+    )
+
+    assert "PAIRS THAT FIT ONE CLIP" in prompt
+    assert "units 2 + 3 (17 words total)" in prompt
+    assert "units 8 + 9 (19 words total)" in prompt
+    assert "units 11 + 12 (22 words total)" in prompt
+    # Unit 4 (22 words) + unit 5 (15 words) overrun the clip, so the
+    # ceiling - not the model - rules that pair out.
+    assert "units 4 + 5" not in prompt
+
+
+def test_the_episode_regression_merges_beats_after_an_all_single_sentence_reply():
+    """
+    The shipped failure as a regression: the episode's visuals were
+    cut one per unit. The model's default all-singleton reply is
+    rejected; on the re-roll it merges exactly the fitting beat pairs
+    - the mountain prayer with the evening, Peter's request with
+    "Come!", and the sinking with the cry for help - while coverage
+    stays exact and no clip overruns the ceiling.
+    """
+    generator, stub = make_generator(
+        llm=StubLLM(
+            grouping_replies=[
+                {"groups": [[i] for i in range(1, 16)]},
+                {
+                    "groups": [
+                        [1],
+                        [2, 3],
+                        [4],
+                        [5],
+                        [6],
+                        [7],
+                        [8, 9],
+                        [10],
+                        [11, 12],
+                        [13],
+                        [14],
+                        [15],
+                    ]
+                },
+            ]
+        )
+    )
+
+    segments = generator.build_story_beat_segments(
+        {"text": EPISODE_001_NARRATION}
+    )
+
+    assert len(stub.grouping_prompts) == 2
+    assert "Every group held a single unit" in stub.grouping_prompts[1]
+
+    max_words = _max_words_per_sentence(make_config())
+    units = build_sentence_segments(EPISODE_001_NARRATION, max_words)
+
+    assert len(segments) == 12
+    assert " ".join(segments) == EPISODE_001_NARRATION
+    assert all(
+        len(segment.split()) <= max_words
+        for segment in segments
+    )
+    # The three pairs the shipped episode cut incorrectly.
+    assert segments[1] == units[1] + " " + units[2]
+    assert segments[6] == units[7] + " " + units[8]
+    assert segments[8] == units[10] + " " + units[11]
+
+
+def test_the_visual_checker_covers_the_shipped_crowd_boarding_failure():
+    """
+    Episode 001 shipped a visual of the crowd climbing into the boat
+    for the sentence that sends the crowd away. The judge prompt for
+    that exact sentence must carry the shipped query and the
+    sharpened criteria: an action assigned to present bystanders is
+    still an invention, and entering is resolved against the
+    passage's own positions.
+    """
+    generator, _ = make_generator()
+    segments = list(EPISODE_001_SHIPPED_SEGMENTS)
+
+    prompt = generator.build_visual_verification_prompt(
+        scripture(reference="Matthew 14:22-33"),
+        segments,
+        0,
+        EPISODE_001_BAD_CROWD_BOARDING,
+    )
+
+    assert EPISODE_001_BAD_CROWD_BOARDING in prompt
+    assert "sends that crowd away" in prompt
+    assert "never the same people shown climbing in" in prompt
+
+
+def test_the_visual_checker_treats_an_unnamed_jesus_as_a_failure():
+    """
+    Episode 001 shipped "a solitary figure" where the passage has
+    Jesus praying on the mountain. The judge must treat a named
+    person reduced to an unnamed stand-in as a failure, and the
+    director prompt must ban the stand-in wording so a re-roll can
+    comply.
+    """
+    generator, _ = make_generator()
+    segments = list(EPISODE_001_SHIPPED_SEGMENTS)
+
+    checker = generator.build_visual_verification_prompt(
+        scripture(reference="Matthew 14:22-33"),
+        segments,
+        1,
+        EPISODE_001_BAD_UNNAMED_JESUS,
+    )
+    director = generator.build_segment_prompt(
+        scripture(reference="Matthew 14:22-33"),
+        segments,
+        1,
+    )
+
+    assert "'a lone figure', 'a solitary figure'" in checker
+    assert "is a failure, even when the scene makes the identity" in (
+        checker
+    )
+    assert "'a lone figure', 'a solitary figure'" in director
+    assert "Naming him is not describing him" in director
+
+
+@pytest.mark.parametrize(
+    ("index", "bad_query", "fixed_query"),
+    [
+        (
+            0,
+            EPISODE_001_BAD_CROWD_BOARDING,
+            "Style: realistic. The crowd disperses along the shore "
+            "while the disciples ready the boat to leave without "
+            "him. Medium shot, the path behind them filling with "
+            "people walking away as the disciples turn to the sea.",
+        ),
+        (
+            10,
+            EPISODE_001_BAD_SHORE_BOARDING,
+            "Style: realistic. Jesus and Peter climb up into the "
+            "small wooden boat in the middle of the dark sea as the "
+            "waves settle around the disciples already aboard. Wide "
+            "shot, no shore anywhere in frame.",
+        ),
+    ],
+)
+def test_a_shipped_bad_visual_is_re_rolled_with_the_checkers_reason(
+    index,
+    bad_query,
+    fixed_query
+):
+    """
+    Both visuals episode 001 shipped against the passage, replayed
+    through the live loop on the shipped 12 segments: the checker
+    rejects the shipped query, the rejection rides the re-roll
+    prompt, and the corrected query is what ships for that sentence.
+    """
+    # The verdicts pop in call order, so the script must approve every
+    # segment before the bad one before rejecting that one's first try.
+    generator, stub = make_generator(
+        llm=StubLLM(
+            queries=[
+                f"Style: realistic. Shot {position + 1}."
+                for position in range(
+                    len(EPISODE_001_SHIPPED_SEGMENTS) + 1
+                )
+            ],
+            verifications=[True] * index + [False, True],
+        )
+    )
+
+    stub.queries[index] = bad_query
+    stub.queries[index + 1] = fixed_query
+
+    segments = list(EPISODE_001_SHIPPED_SEGMENTS)
+    content = generator.generate(
+        scripture(reference="Matthew 14:22-33"),
+        segments,
+        narration=EPISODE_001_REGENERATED_NARRATION,
+    )
+
+    assert len(content["visuals"]) == len(segments)
+    assert stub.visual_calls == len(segments) + 1
+    assert len(stub.verification_prompts) == len(segments) + 1
+
+    # The re-roll carries the checker's rejection forward.
+    re_roll_prompt = stub.visual_prompts[index + 1]
+    assert "YOUR PREVIOUS ANSWER WAS REJECTED" in re_roll_prompt
+    assert "The query shows the wrong beat." in re_roll_prompt
+
+    # The corrected query is what shipped for that sentence.
+    assert content["visuals"][index]["search_query"] == fixed_query
+    assert bad_query not in content["visuals"][index]["search_query"]
 

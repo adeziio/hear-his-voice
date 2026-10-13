@@ -17,13 +17,15 @@ from scripture.segmenter import (
 #
 # Each SnapGenAI clip carries one visual segment, and its length is the
 # `duration_target` in config/ai_models.json (for example "8s"). The
-# spoken-length ceiling used when splitting the narration is read from that
-# setting by _duration_target_seconds() rather than hardcoded: every
-# completed narration sentence becomes one segment and one clip, and only a
-# sentence that would speak for longer than the clip is divided at its own
-# punctuation into shorter sentences. A shorter sentence is fine as it is -
-# the duration is a maximum, never a duration to fill. The default below is
-# only the fallback used when that setting is missing or cannot be parsed.
+# spoken-length ceiling used when cutting the narration is read from that
+# setting by _duration_target_seconds() rather than hardcoded: consecutive
+# narration units that form one story beat share one segment (the model
+# chooses the beats, build_story_beat_segments enforces the coverage and
+# the ceiling), while a segment that would speak for longer than the clip
+# is divided at its own punctuation. A shorter segment is fine as it is -
+# the duration is a maximum, never a duration to fill. The default below
+# is only the fallback used when that setting is missing or cannot be
+# parsed.
 DEFAULT_SECONDS_PER_VISUAL = 8
 DEFAULT_WORDS_PER_SECOND = 2.9
 
@@ -203,6 +205,28 @@ NARRATION_VERIFICATION_SCHEMA = {
         "issues": {"type": "string"},
     },
     "required": ["accurate", "issues"],
+}
+
+
+# The narration is cut into visual segments BY STORY BEAT: consecutive
+# narration units that form one coherent moment share one visual. The
+# model returns which unit numbers (1..N) belong to each group, and the
+# validation in _validate_grouping rejects any partition that omits,
+# repeats, or reorders a unit - so narration coverage is guaranteed in
+# code even though the choice of beats is the model's judgement.
+SEGMENT_GROUPING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "groups": {
+            "type": "array",
+            "items": {
+                "type": "array",
+                "items": {"type": "integer"},
+            },
+        },
+    },
+    "required": ["groups"],
+    "additionalProperties": False,
 }
 
 
@@ -403,8 +427,10 @@ class ContentGenerator(
 
         1. tells the passage as original narration, checked against
            the passage itself for fidelity (write_narration),
-        2. splits that narration into spoken segments
-           (deterministic),
+        2. cuts that narration into story-beat visual segments - the
+           model groups the beats, code guarantees complete
+           narration coverage and the duration ceiling
+           (build_story_beat_segments),
         3. asks the AI for one SnapGenAI prompt per narration segment,
            each shown the narration immediately before and after it so
            the prompt fits that exact moment of the story,
@@ -489,6 +515,468 @@ class ContentGenerator(
         self.log(
             f"{len(segments)} sentence visuals for "
             f"{len(split_sentences(text))} narration sentences "
+            f"({len(text.split())} words, "
+            f"~{len(text.split()) / max(words_per_second, 0.1):.0f}s, "
+            f"at most {seconds_per_visual:g}s per segment)."
+        )
+
+        return segments
+
+    def build_grouping_prompt(
+        self,
+        scripture,
+        units,
+        max_words,
+        feedback=None
+    ):
+        """
+        Asks which consecutive narration units form one visual.
+
+        The model judges the story beats - a request and its immediate
+        reply are one moment; a person then acting begins a new visual
+        - while the prompt states the two rules the code re-checks
+        anyway: every unit used exactly once in order (complete
+        narration coverage) and at most max_words per group (the
+        clip's spoken ceiling from duration_target - a maximum to
+        respect, never a duration to fill).
+        """
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+
+        numbered = "\n".join(
+            f"{position + 1}. {text}"
+            for position, text in enumerate(units)
+        )
+
+        # The ceiling arithmetic is code's job, the beat judgment is
+        # the model's: list every consecutive pair whose combined
+        # spoken length fits one clip, so the model rules on each
+        # pair explicitly instead of defaulting to one cut per unit.
+        eligible = []
+
+        for position in range(1, len(units)):
+
+            pair_words = (
+                len(units[position - 1].split())
+                + len(units[position].split())
+            )
+
+            if pair_words <= max_words:
+
+                eligible.append(
+                    (
+                        position,
+                        pair_words,
+                        units[position - 1],
+                        units[position],
+                    )
+                )
+
+        pair_lines = "".join(
+            f"  units {position} + {position + 1} "
+            f"({pair_words} words total):\n"
+            f'    "{first}"\n'
+            f'    "{second}"\n'
+            for position, pair_words, first, second in eligible
+        )
+
+        pairs_block = ""
+
+        if eligible:
+
+            pairs_block = (
+                "PAIRS THAT FIT ONE CLIP - DECIDE EACH ONE\n"
+                "Every pair listed below is consecutive and its "
+                "combined spoken length is within the clip ceiling, "
+                "so the ceiling never forces a cut between them. For "
+                "each pair decide explicitly: if the two units are "
+                "ONE continuous moment - a request and its reply, an "
+                "action and its immediate effect, speech and the "
+                "reaction it draws - they share one visual; only a "
+                "genuine story beat change justifies the cut. Never "
+                "cut a pair merely because it holds two "
+                "sentences.\n"
+                + pair_lines
+                + "\n"
+            )
+
+        rejection = ""
+
+        if feedback:
+
+            rejection = (
+                "YOUR PREVIOUS GROUPING WAS REJECTED\n"
+                "Fix this problem in your next answer:\n"
+                f"{feedback}\n\n"
+            )
+
+        return (
+            "You cut the narration of \""
+            + name
+            + "\" into visual segments - ONE VISUAL PER STORY BEAT, "
+            "not one visual per sentence.\n\n"
+            + rejection
+            + "Context: "
+            + str(scripture.get("translation", ""))
+            + " "
+            + str(scripture.get("reference", ""))
+            + ". The narration below was already written from that "
+            "passage and is FIXED: the narrator speaks it exactly as "
+            "written. You group its units into visuals; you never "
+            "edit, reorder, add, or remove a single word.\n\n"
+            "FULL NARRATION:\n"
+            + " ".join(units)
+            + "\n\n"
+            "NARRATION UNITS TO GROUP (numbered):\n"
+            + numbered
+            + "\n\n"
+            + pairs_block
+            + "GROUP THE UNITS INTO VISUALS\n"
+            "- Return groups: a list of groups, each holding the unit "
+            "numbers of consecutive units that share one visual.\n"
+            "- MERGE FIRST: consecutive units that belong to ONE "
+            "coherent moment - a request and its immediate reply, an "
+            "action and its immediate effect, speech and the "
+            "reaction it draws - must share one visual whenever "
+            "their combined length fits the ceiling. For instance, "
+            "a disciple asking to come and the reply \"Come!\" are "
+            "one visual; the disciple then stepping out of the boat "
+            "begins the next one.\n"
+            "- Cut at a genuine story beat only: a new action "
+            "begins, the place or time changes, or the depicted "
+            "moment is over. Short groups are fine, but cut because "
+            "the beat changed - never just to keep groups small.\n"
+            "- One visual per unit - one per sentence - is a FAILED "
+            "answer whenever any two consecutive units could have "
+            "shared one clip.\n"
+            "- Every number from 1 to "
+            + str(len(units))
+            + " must appear EXACTLY ONCE, in ascending order across "
+            "the groups. No unit may be omitted, repeated, or "
+            "reordered: together the groups cover the whole "
+            "narration, in order, word for word.\n"
+            "- Start a new group when a new action, place, or beat "
+            "begins. A group may hold a single unit; it just needs "
+            "a reason from the story, not the sentence "
+            "boundary.\n"
+            "- Each group's total must be "
+            + str(max_words)
+            + " words or fewer: that is the spoken ceiling of one "
+            "clip (its duration_target). The ceiling is a maximum, "
+            "never a duration to fill - if the story beats would "
+            "overrun it, cut at the next natural beat instead.\n"
+            "- Never split a unit in half; never rewrite any text.\n\n"
+            'Return JSON: {"groups": [[1, 2], [3], [4, 5]]}'
+        )
+
+    def _validate_grouping(
+        self,
+        reply,
+        count
+    ):
+        """
+        Returns (groups, error): a usable partition of 1..count, or the
+        reason the reply cannot be trusted.
+
+        Only an explicit, complete, in-order partition passes: a reply
+        with no JSON, a gap, a repeat, or an out-of-range index is
+        rejected with this reason, which becomes the feedback on the
+        re-roll.
+        """
+        try:
+
+            payload = self.parse_direction(
+                reply
+            )
+
+        except ContentGenerationError:
+
+            return (
+                None,
+                "The reply contained no parseable JSON.",
+            )
+
+        groups = (
+            payload.get("groups")
+            if isinstance(payload, dict)
+            else None
+        )
+
+        if not isinstance(groups, list) or not groups:
+
+            return (
+                None,
+                'The reply must be {"groups": [[...]]} with at '
+                "least one group.",
+            )
+
+        flattened = []
+
+        for group in groups:
+
+            if not isinstance(group, list) or not group:
+
+                return (
+                    None,
+                    "Every group must be a non-empty list of unit "
+                    "numbers.",
+                )
+
+            for item in group:
+
+                if not isinstance(item, int) or isinstance(item, bool):
+
+                    return (
+                        None,
+                        "Unit numbers must be integers.",
+                    )
+
+                if not 1 <= item <= count:
+
+                    return (
+                        None,
+                        f"Unit {item} does not exist; units run 1 to "
+                        f"{count}.",
+                    )
+
+                flattened.append(item)
+
+        expected = list(
+            range(1, count + 1)
+        )
+
+        if flattened != expected:
+
+            missing = sorted(
+                set(expected) - set(flattened)
+            )
+            repeated = sorted(
+                {
+                    number
+                    for number in flattened
+                    if flattened.count(number) > 1
+                }
+            )
+            detail = []
+
+            if missing:
+
+                detail.append(f"missing unit(s) {missing}")
+
+            if repeated:
+
+                detail.append(f"repeated unit(s) {repeated}")
+
+            if not detail:
+
+                detail.append(
+                    "the units must run in ascending order across "
+                    "the groups"
+                )
+
+            return (
+                None,
+                "The groups must cover every unit exactly once, in "
+                "order; " + "; ".join(detail) + ".",
+            )
+
+        return (
+            groups,
+            None,
+        )
+
+    @staticmethod
+    def _cap_group_words(
+        groups,
+        units,
+        max_words
+    ):
+        """
+        Enforces the spoken ceiling on top of the model's beat choice.
+
+        The story beats come from the model; the clip length does not.
+        A group whose units would speak longer than the clip is cut
+        into consecutive pieces at unit boundaries - never inside a
+        unit - and a group already within the ceiling is left exactly
+        as the model chose it.
+        """
+        capped = []
+
+        for group in groups:
+
+            piece = []
+            words = 0
+
+            for item in group:
+
+                unit_words = len(
+                    units[item - 1].split()
+                )
+
+                if (
+                    piece
+                    and words + unit_words > max_words
+                ):
+
+                    capped.append(piece)
+                    piece = []
+                    words = 0
+
+                piece.append(item)
+                words += unit_words
+
+            if piece:
+
+                capped.append(piece)
+
+        return capped
+
+    def build_story_beat_segments(
+        self,
+        scripture
+    ):
+        """
+        Cuts the narration into one visual per STORY BEAT instead of
+        one visual per sentence.
+
+        The model decides which consecutive narration units form one
+        coherent moment; this method guarantees the rest: every unit
+        appears in exactly one segment, in order, joined word for word
+        from the units themselves (no narration is omitted, repeated,
+        or rewritten), and no segment may speak longer than the
+        clip's duration_target ceiling - a maximum, never a duration
+        to fill. When grouping is switched off or the model never
+        returns a usable partition, it falls back to build_segments():
+        one visual per sentence - always correct, if less clever.
+        """
+        if not self.generation_config.get(
+            "story_beat_grouping",
+            True
+        ):
+
+            return self.build_segments(
+                scripture
+            )
+
+        text = scripture["text"]
+        max_words = _max_words_per_sentence(self.config)
+        units = build_sentence_segments(
+            text,
+            max_words,
+        )
+
+        if len(units) < 2:
+
+            return self.build_segments(
+                scripture
+            )
+
+        attempts = max(
+            1,
+            int(
+                self.generation_config.get(
+                    "grouping_attempts",
+                    3
+                )
+            ),
+        )
+
+        groups = None
+        feedback = None
+
+        for _ in range(attempts):
+
+            prompt = self.build_grouping_prompt(
+                scripture,
+                units,
+                max_words,
+                feedback,
+            )
+
+            try:
+
+                reply = self.llm.generate(
+                    prompt,
+                    response_format=SEGMENT_GROUPING_SCHEMA,
+                )
+
+            except Exception as error:
+
+                feedback = (
+                    f"The grouping request itself failed: {error}"
+                )
+                continue
+
+            groups, feedback = self._validate_grouping(
+                reply,
+                len(units),
+            )
+
+            if groups is None:
+
+                continue
+
+            # One visual per sentence is exactly what this feature
+            # exists to stop: reject an all-singleton partition when
+            # at least one pair of consecutive units would have fit
+            # one clip together. Singleton stays legal when no pair
+            # could ever share the clip - the ceiling wins over the
+            # merge, never the other way round.
+            if (
+                len(groups) == len(units)
+                and any(
+                    len(units[position - 1].split())
+                    + len(units[position].split())
+                    <= max_words
+                    for position in range(1, len(units))
+                )
+            ):
+
+                groups = None
+                feedback = (
+                    "Every group held a single unit, so not one of "
+                    "the fitting pairs listed in this prompt was "
+                    "merged. Rule on each listed pair: pairs that "
+                    "form one continuous moment share one visual; "
+                    "only a genuine story beat change justifies a "
+                    "cut."
+                )
+                continue
+
+            break
+
+        if groups is None:
+
+            self.log(
+                "Story-beat grouping never returned a usable "
+                f"partition after {attempts} attempts; falling back "
+                "to one visual per sentence."
+            )
+
+            return self.build_segments(
+                scripture
+            )
+
+        groups = self._cap_group_words(
+            groups,
+            units,
+            max_words,
+        )
+
+        segments = [
+            " ".join(
+                units[item - 1]
+                for item in group
+            )
+            for group in groups
+        ]
+
+        words_per_second = _words_per_second(self.config)
+        seconds_per_visual = _duration_target_seconds(self.config)
+
+        self.log(
+            f"{len(segments)} story-beat visuals from "
+            f"{len(units)} narration units "
             f"({len(text.split())} words, "
             f"~{len(text.split()) / max(words_per_second, 0.1):.0f}s, "
             f"at most {seconds_per_visual:g}s per segment)."
@@ -620,10 +1108,15 @@ class ContentGenerator(
             "boat', whenever the passage names who 'they' are. Only "
             "name people the passage itself establishes - never guess "
             "an identity.\n"
-            "Name Jesus explicitly whenever he appears in a scene, but "
-            "never describe his physical appearance - no face, hair, "
-            "build, or clothing details for him. Show him by his "
-            "actions, his position, and the people around him.\n"
+            "Name Jesus explicitly whenever he appears in a scene: "
+            "always write 'Jesus', never an unnamed stand-in such as "
+            "'a lone figure', 'a solitary figure', or 'a distant man'. "
+            "Naming him is not describing him: write 'Jesus stands on "
+            "the hillside in prayer', never 'a solitary figure "
+            "prays'. Never describe his physical appearance - no "
+            "face, hair, build, or clothing details for him. Show him "
+            "by his actions, his position, and the people around "
+            "him.\n"
             "When Jesus is not in the scene, describe the other visible "
             "people plainly and historically: who they are in the "
             "story, and their period-appropriate appearance, clothing, "
@@ -727,8 +1220,8 @@ class ContentGenerator(
         structured question - aligned, yes or no, and why not. The
         criteria are the failure modes this channel has actually hit:
         the wrong beat in the chronology, wrong agents, invented
-        locations, contradicted conditions, invented events, and
-        prompts that cannot stand alone.
+        locations, contradicted conditions, invented events, named
+        people left unnamed, and prompts that cannot stand alone.
         """
         channel = self.channel_config.get("channel", {})
         name = str(channel.get("name", "Hear His Voice"))
@@ -785,12 +1278,22 @@ class ContentGenerator(
             "one person's action credited to another. Other people the "
             "passage has present in this scene may appear as "
             "bystanders or witnesses - their presence is not a "
-            "failure.\n"
+            "failure, but an action given to them that this sentence "
+            "does not narrate is: showing people from the crowd "
+            "climbing into the boat while the sentence sends that "
+            "crowd away and tells only the disciples to board fails "
+            "here, even though the passage has the crowd present.\n"
             "- Location: are the people where the passage and the "
             "narration put them at this point? Never show a location "
             "the narration does not put them in - no invented shore, "
             "land, or house, and no boarding shown when the narration "
-            "has someone already aboard.\n"
+            "has someone already aboard. Resolve every entering and "
+            "leaving against the passage's own positions: when the "
+            "narration reports a group entering a place the passage "
+            "already has them in, the ones who enter are the people "
+            "the story has outside it at this point - never the same "
+            "people shown climbing in, and never from a shore the "
+            "narration never mentions.\n"
             "- Conditions: does it contradict a condition still in "
             "effect - storm, night, rain, crowd, being apart? A "
             "contradiction is a failure.\n"
@@ -800,6 +1303,12 @@ class ContentGenerator(
             "sentence - the setting, the other people present in this "
             "scene, the weather - are legitimate context, not "
             "invention.\n"
+            "- Naming: is every person the passage names who appears "
+            "in the shot called by that name? A named person reduced "
+            "to an unnamed stand-in - 'a lone figure', 'a solitary "
+            "figure', or 'a distant man' where the passage has Jesus "
+            "- is a failure, even when the scene makes the identity "
+            "guessable.\n"
             "- Self-containedness: does it name its people from the "
             "passage instead of leaving an unresolved word like "
             "'they'?\n\n"
@@ -1677,16 +2186,13 @@ class ContentGenerator(
         passage. The WEBC passage is context and authority only; it
         is never a narration fallback. The returned narration is used
         as-is after transport parsing. A narration the accuracy check
-        rejects is re-written with the issues as feedback, up to
-        verification_attempts times (set content_generation
+        rejects is re-written with the issues as feedback and checked
+        again, repeating until the check passes - a rejected
+        narration never ships (set content_generation
         .verify_narration to false to skip the check).
         """
         verify = bool(
             self.generation_config.get("verify_narration", True)
-        )
-        attempts = max(
-            1,
-            int(self.generation_config.get("verification_attempts", 3) or 1)
         )
 
         self.log("Writing the narration...")
@@ -1694,7 +2200,7 @@ class ContentGenerator(
         feedback = None
         narration = ""
 
-        for attempt in range(attempts):
+        while True:
 
             prompt = self.build_narration_prompt(
                 scripture,
@@ -1724,18 +2230,11 @@ class ContentGenerator(
             if accurate:
                 break
 
-            if attempt + 1 < attempts:
-                self.log(
-                    f"Narration rejected ({issues}) - writing it "
-                    "again..."
-                )
-                feedback = issues
-            else:
-                self.log(
-                    f"Narration still rejected after {attempts} "
-                    f"attempts ({issues}) - keeping the last "
-                    "attempt."
-                )
+            self.log(
+                f"Narration rejected ({issues}) - writing it "
+                "again..."
+            )
+            feedback = issues
 
         self.log(
             f"Narration ready ({len(narration.split())} words)."
@@ -1764,8 +2263,8 @@ class ContentGenerator(
         establishing shots. Every finished visual is then checked
         against its own sentence by a separate verification call; a
         rejected visual is re-rolled with the checker's reason as
-        feedback, up to verification_attempts times, so the episode
-        ships checked visuals rather than first samples (set
+        feedback and checked again, repeating until the check passes
+        - a rejected visual never ships (set
         content_generation.verify_visuals to false to skip the check).
         A final separate call writes the title, summary, and mood.
         assemble_content() then pairs each collected visual with its
@@ -1779,17 +2278,13 @@ class ContentGenerator(
         verify = bool(
             self.generation_config.get("verify_visuals", True)
         )
-        attempts = max(
-            1,
-            int(self.generation_config.get("verification_attempts", 3) or 1)
-        )
 
         visuals = []
         for index in range(len(segments)):
             feedback = None
             parsed = {}
 
-            for attempt in range(attempts):
+            while True:
 
                 prompt = self.build_segment_prompt(
                     scripture,
@@ -1820,18 +2315,11 @@ class ContentGenerator(
                 if aligned:
                     break
 
-                if attempt + 1 < attempts:
-                    self.log(
-                        f"Sentence {index + 1}: rejected ({reason}) - "
-                        "re-rolling..."
-                    )
-                    feedback = reason
-                else:
-                    self.log(
-                        f"Sentence {index + 1}: still rejected after "
-                        f"{attempts} attempts ({reason}) - keeping the "
-                        "last attempt."
-                    )
+                self.log(
+                    f"Sentence {index + 1}: rejected ({reason}) - "
+                    "re-rolling..."
+                )
+                feedback = reason
 
             visuals.append(parsed)
 
