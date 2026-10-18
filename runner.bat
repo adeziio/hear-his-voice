@@ -258,7 +258,7 @@ echo.
 REM Each project needs its own tunnel log, or they overwrite each other's
 REM and stop being able to read their own URL.
 
-set "TUNNEL_LOG=%TEMP%\hhv_cloudflared.log"
+set "TUNNEL_LOG=%TEMP%\hear_his_voice_cloudflared.log"
 
 set "CLOUDFLARED_EXE="
 
@@ -311,12 +311,12 @@ echo Starting Cloudflare tunnel...
 
 del "%TUNNEL_LOG%" >nul 2>&1
 
-start "hhv-cloudflared" /MIN cmd /c ""%CLOUDFLARED_EXE%" tunnel --url http://localhost:%SERVER_PORT% --no-autoupdate > "%TUNNEL_LOG%" 2>&1"
+start "hear-his-voice-cloudflared" /MIN cmd /c ""%CLOUDFLARED_EXE%" tunnel --url http://localhost:%SERVER_PORT% --no-autoupdate > "%TUNNEL_LOG%" 2>&1"
 
 echo Waiting for the public tunnel URL...
 
 set "PUBLIC_URL="
-set "TUNNEL_LINE_FILE=%TEMP%\hhv_tunnel_line.txt"
+set "TUNNEL_LINE_FILE=%TEMP%\hear_his_voice_tunnel_line.txt"
 
 for /L %%i in (1,1,30) do (
 
