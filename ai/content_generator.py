@@ -8,7 +8,7 @@ from ai.providers.ollama_provider import OllamaProvider
 
 from scripture.segmenter import (
     split_sentences,
-    build_sentence_segments
+    build_word_segments
 )
 
 
@@ -18,14 +18,14 @@ from scripture.segmenter import (
 # Each SnapGenAI clip carries one visual segment, and its length is the
 # `duration_target` in config/ai_models.json (for example "8s"). The
 # spoken-length ceiling used when cutting the narration is read from that
-# setting by _duration_target_seconds() rather than hardcoded: consecutive
-# narration units that form one story beat share one segment (the model
-# chooses the beats, build_story_beat_segments enforces the coverage and
-# the ceiling), while a segment that would speak for longer than the clip
-# is divided at its own punctuation. A shorter segment is fine as it is -
-# the duration is a maximum, never a duration to fill. The default below
-# is only the fallback used when that setting is missing or cannot be
-# parsed.
+# setting by _duration_target_seconds() rather than hardcoded: the narration
+# is cut into consecutive word chunks of up to duration_target x
+# words_per_second words each (build_word_segments enforces the count), and
+# a cut may fall mid-sentence or mid-quotation - always between words, so
+# every word of the narration appears exactly once, in order. A shorter
+# final chunk is fine - the duration is a maximum, never a duration to
+# fill. The default below is only the fallback used when that setting is
+# missing or cannot be parsed.
 DEFAULT_SECONDS_PER_VISUAL = 8
 DEFAULT_WORDS_PER_SECOND = 2.9
 
@@ -96,15 +96,16 @@ def _words_per_second(config):
     )
 
 
-def _max_words_per_sentence(config):
+def _max_words_per_segment(config):
     """
-    Returns the most words one narration sentence may hold.
+    Returns the most words one narration segment may hold.
 
-    A sentence is spoken over exactly one SnapGenAI clip, so its spoken
-    length may not exceed that clip's duration_target. This is the same
-    arithmetic build_segments() uses to cut the narration, and it is
-    reused to tell the writer the budget up front, so the telling is
-    written to fit the clips rather than cut to fit them afterwards.
+    The spoken-length ceiling is duration_target x words_per_second:
+    one clip speaks at most this much, so it is the word budget of one
+    narration segment - the narration is cut into chunks of exactly
+    this many words (except the shorter final chunk) by
+    build_word_segments - and it is the budget the narration prompt
+    tells the writer up front.
 
     Both inputs come from configuration, so the limit changes with the
     configured clip length or speaking rate instead of a hardcoded number.
@@ -427,10 +428,10 @@ class ContentGenerator(
 
         1. tells the passage as original narration, checked against
            the passage itself for fidelity (write_narration),
-        2. cuts that narration into story-beat visual segments - the
-           model groups the beats, code guarantees complete
-           narration coverage and the duration ceiling
-           (build_story_beat_segments),
+        2. cuts that narration into word-count visual segments - the
+           ceiling comes from duration_target x words_per_second, and
+           code guarantees exact narration coverage and the word count
+           (build_segments),
         3. asks the AI for one SnapGenAI prompt per narration segment,
            each shown the narration immediately before and after it so
            the prompt fits that exact moment of the story,
@@ -487,37 +488,44 @@ class ContentGenerator(
         scripture
     ):
         """
-        Splits the generated narration into visual segments: one segment
-        per completed narration sentence, so each sentence gets exactly
-        one SnapGenAI prompt and one clip.
+        Cuts the generated narration into visual segments: consecutive
+        word chunks of up to the configured word ceiling
+        (duration_target x words_per_second), so each chunk gets
+        exactly one SnapGenAI prompt and one clip.
 
-        The configured duration_target is the maximum spoken length a
-        segment may reach - only a sentence that would speak for longer
-        than one clip is divided at its own punctuation into shorter
-        sentences. A shorter sentence is kept whole; the duration is a
+        The cut falls between words - it may land mid-sentence or
+        mid-quotation, which is intentional: grouping is strictly by
+        spoken length, never by punctuation. Every word of the
+        narration appears exactly once, in order; a shorter final
+        chunk is fine and is never padded - the duration is a
         ceiling, never a duration to fill.
+
+        The visual prompts receive the full passage and the full
+        narration as context, so a chunk that starts or ends
+        mid-sentence still depicts the correct characters, action,
+        setting, and story moment.
         """
         text = scripture["text"]
 
-        # How fast the narrator reads, and how long one clip holds - both
-        # from configuration, through the same helpers the narration prompt
-        # uses to tell the writer the budget up front. One sentence is
-        # spoken over one clip, so this is the ceiling for one segment.
+        # How fast the narrator reads, and how long one clip holds -
+        # both from configuration, through the same helpers the
+        # narration prompt uses to tell the writer the budget up
+        # front.
         words_per_second = _words_per_second(self.config)
         seconds_per_visual = _duration_target_seconds(self.config)
-        max_words_per_segment = _max_words_per_sentence(self.config)
+        max_words_per_segment = _max_words_per_segment(self.config)
 
-        segments = build_sentence_segments(
+        segments = build_word_segments(
             text,
             max_words_per_segment,
         )
 
         self.log(
-            f"{len(segments)} sentence visuals for "
-            f"{len(split_sentences(text))} narration sentences "
-            f"({len(text.split())} words, "
-            f"~{len(text.split()) / max(words_per_second, 0.1):.0f}s, "
-            f"at most {seconds_per_visual:g}s per segment)."
+            f"{len(segments)} word-chunk visuals for "
+            f"{len(text.split())} narration words "
+            f"(~{len(text.split()) / max(words_per_second, 0.1):.0f}s, "
+            f"at most {max_words_per_segment} words / "
+            f"{seconds_per_visual:g}s per segment)."
         )
 
         return segments
@@ -794,195 +802,77 @@ class ContentGenerator(
         """
         Enforces the spoken ceiling on top of the model's beat choice.
 
+        Returns a usable partition (groups of unit numbers) in which
+        every group is within the clip's spoken ceiling and adjacent
+        small groups or fragments have been merged where they fit, or
+        None when the model's partition cannot be made compliant
+        without truncation - in which case the caller rejects the
+        partition and either re-rolls or falls back to one visual per
+        sentence.
+
         The story beats come from the model; the clip length does not.
-        A group whose units would speak longer than the clip is cut
-        into consecutive pieces at unit boundaries - never inside a
-        unit - and a group already within the ceiling is left exactly
-        as the model chose it.
+
+        Rules:
+        - Any group whose units would speak longer than the clip is
+          rejected outright (fail-closed). Groups are never truncated
+          or cut to fit - an over-ceiling group is a model judgment
+          error, and the whole partition is rejected.
+        - Adjacent groups whose combined word count fits the ceiling
+          are merged, so a tiny leftover fragment is absorbed by its
+          neighbor instead of shipping as its own visual.
+        - Units are never split: a speaker's quoted utterance stays
+          whole.
+        - The narration text, order, and coverage are preserved
+          exactly - every unit appears in exactly one group, in order.
         """
-        capped = []
+        unit_words = [0] + [
+            len(text.split())
+            for text in units
+        ]
+
+        # Fail closed: no group may exceed the clip's spoken ceiling,
+        # and groups are never truncated or cut to fit. An over-ceiling
+        # group means the model misjudged the beats, so reject the
+        # whole partition and let the caller re-roll or fall back.
+        for group in groups:
+
+            if sum(
+                unit_words[item]
+                for item in group
+            ) > max_words:
+
+                return None
+
+        # Merge adjacent small groups and fragments whenever they fit
+        # within one clip. Units are never split, so dialogue stays
+        # intact; the combined group stays within the ceiling by
+        # construction.
+        merged = []
 
         for group in groups:
 
-            piece = []
-            words = 0
+            if merged:
 
-            for item in group:
-
-                unit_words = len(
-                    units[item - 1].split()
+                combined = (
+                    sum(
+                        unit_words[item]
+                        for item in merged[-1]
+                    )
+                    + sum(
+                        unit_words[item]
+                        for item in group
+                    )
                 )
 
-                if (
-                    piece
-                    and words + unit_words > max_words
-                ):
+                if combined <= max_words:
 
-                    capped.append(piece)
-                    piece = []
-                    words = 0
+                    merged[-1].extend(group)
 
-                piece.append(item)
-                words += unit_words
+                    continue
 
-            if piece:
+            merged.append(list(group))
 
-                capped.append(piece)
-
-        return capped
-
-    def build_story_beat_segments(
-        self,
-        scripture
-    ):
-        """
-        Cuts the narration into one visual per STORY BEAT instead of
-        one visual per sentence.
-
-        The model decides which consecutive narration units form one
-        coherent moment; this method guarantees the rest: every unit
-        appears in exactly one segment, in order, joined word for word
-        from the units themselves (no narration is omitted, repeated,
-        or rewritten), and no segment may speak longer than the
-        clip's duration_target ceiling - a maximum, never a duration
-        to fill. When grouping is switched off or the model never
-        returns a usable partition, it falls back to build_segments():
-        one visual per sentence - always correct, if less clever.
-        """
-        if not self.generation_config.get(
-            "story_beat_grouping",
-            True
-        ):
-
-            return self.build_segments(
-                scripture
-            )
-
-        text = scripture["text"]
-        max_words = _max_words_per_sentence(self.config)
-        units = build_sentence_segments(
-            text,
-            max_words,
-        )
-
-        if len(units) < 2:
-
-            return self.build_segments(
-                scripture
-            )
-
-        attempts = max(
-            1,
-            int(
-                self.generation_config.get(
-                    "grouping_attempts",
-                    3
-                )
-            ),
-        )
-
-        groups = None
-        feedback = None
-
-        for _ in range(attempts):
-
-            prompt = self.build_grouping_prompt(
-                scripture,
-                units,
-                max_words,
-                feedback,
-            )
-
-            try:
-
-                reply = self.llm.generate(
-                    prompt,
-                    response_format=SEGMENT_GROUPING_SCHEMA,
-                )
-
-            except Exception as error:
-
-                feedback = (
-                    f"The grouping request itself failed: {error}"
-                )
-                continue
-
-            groups, feedback = self._validate_grouping(
-                reply,
-                len(units),
-            )
-
-            if groups is None:
-
-                continue
-
-            # One visual per sentence is exactly what this feature
-            # exists to stop: reject an all-singleton partition when
-            # at least one pair of consecutive units would have fit
-            # one clip together. Singleton stays legal when no pair
-            # could ever share the clip - the ceiling wins over the
-            # merge, never the other way round.
-            if (
-                len(groups) == len(units)
-                and any(
-                    len(units[position - 1].split())
-                    + len(units[position].split())
-                    <= max_words
-                    for position in range(1, len(units))
-                )
-            ):
-
-                groups = None
-                feedback = (
-                    "Every group held a single unit, so not one of "
-                    "the fitting pairs listed in this prompt was "
-                    "merged. Rule on each listed pair: pairs that "
-                    "form one continuous moment share one visual; "
-                    "only a genuine story beat change justifies a "
-                    "cut."
-                )
-                continue
-
-            break
-
-        if groups is None:
-
-            self.log(
-                "Story-beat grouping never returned a usable "
-                f"partition after {attempts} attempts; falling back "
-                "to one visual per sentence."
-            )
-
-            return self.build_segments(
-                scripture
-            )
-
-        groups = self._cap_group_words(
-            groups,
-            units,
-            max_words,
-        )
-
-        segments = [
-            " ".join(
-                units[item - 1]
-                for item in group
-            )
-            for group in groups
-        ]
-
-        words_per_second = _words_per_second(self.config)
-        seconds_per_visual = _duration_target_seconds(self.config)
-
-        self.log(
-            f"{len(segments)} story-beat visuals from "
-            f"{len(units)} narration units "
-            f"({len(text.split())} words, "
-            f"~{len(text.split()) / max(words_per_second, 0.1):.0f}s, "
-            f"at most {seconds_per_visual:g}s per segment)."
-        )
-
-        return segments
+        return merged
 
     def build_segment_prompt(
         self,
@@ -1883,14 +1773,14 @@ class ContentGenerator(
             "NARRATION RULES\n"
             + rules
             + "\n\nSPOKEN LENGTH\n"
-            f"Each sentence is spoken over one SnapGenAI clip of "
-            f"{_duration_target_seconds(self.config):g} seconds, and the "
-            f"cut between clips happens only at a completed sentence "
-            f"boundary. Keep every sentence to about "
-            f"{_max_words_per_sentence(self.config)} words or fewer so it "
-            f"fits that clip: when one thought would run longer, divide it "
-            f"into several shorter, natural, source-faithful sentences. A "
-            f"short sentence is never padded."
+            f"Each clip of {_duration_target_seconds(self.config):g} "
+            f"seconds carries at most "
+            f"{_max_words_per_segment(self.config)} words of narration "
+            f"when the words are spoken at the configured rate, and the "
+            f"cut between clips falls between words - it may land inside "
+            f"a sentence. Write the telling naturally; the segmentation "
+            f"code groups the words into clips afterwards. A short "
+            f"ending is never padded."
         )
 
         prompt += (
@@ -2187,12 +2077,21 @@ class ContentGenerator(
         is never a narration fallback. The returned narration is used
         as-is after transport parsing. A narration the accuracy check
         rejects is re-written with the issues as feedback and checked
-        again, repeating until the check passes - a rejected
-        narration never ships (set content_generation
-        .verify_narration to false to skip the check).
+        again, up to verification_attempts times; when the cap is hit
+        the last draft ships (set content_generation.verify_narration
+        to false to skip the check).
         """
         verify = bool(
             self.generation_config.get("verify_narration", True)
+        )
+        verification_attempts = max(
+            1,
+            int(
+                self.generation_config.get(
+                    "verification_attempts",
+                    3,
+                )
+            ),
         )
 
         self.log("Writing the narration...")
@@ -2200,7 +2099,7 @@ class ContentGenerator(
         feedback = None
         narration = ""
 
-        while True:
+        for _ in range(verification_attempts):
 
             prompt = self.build_narration_prompt(
                 scripture,
@@ -2235,6 +2134,13 @@ class ContentGenerator(
                 "again..."
             )
             feedback = issues
+        else:
+
+            self.log(
+                f"Narration verification never passed after "
+                f"{verification_attempts} attempts; shipping the "
+                "last draft."
+            )
 
         self.log(
             f"Narration ready ({len(narration.split())} words)."
@@ -2255,28 +2161,43 @@ class ContentGenerator(
         call's own model output: the model here directs the visuals,
         the title, the summary, and the mood, and nothing else.
 
-        Visuals are directed one narration sentence at a time. Each
+        Visuals are directed one narration segment at a time. Each
         segment gets its own focused call - showing the full passage,
-        the full narration, and that sentence's immediate neighbours -
-        so every prompt depicts exactly its own beat instead of the
+        the full narration, and that segment's immediate neighbours -
+        so every prompt depicts exactly its own moment instead of the
         model collapsing the whole episode into a few repeated
         establishing shots. Every finished visual is then checked
-        against its own sentence by a separate verification call; a
+        against its own segment by a separate verification call; a
         rejected visual is re-rolled with the checker's reason as
-        feedback and checked again, repeating until the check passes
-        - a rejected visual never ships (set
+        feedback and checked again, up to verification_attempts
+        times - when the cap is hit the last draft ships (set
         content_generation.verify_visuals to false to skip the check).
         A final separate call writes the title, summary, and mood.
         assemble_content() then pairs each collected visual with its
-        own sentence, in order.
+        own segment, in order.
+
+        Segmentation is already FINAL when this method is called: the
+        segments list is read only. A reroll repairs the visual prompt
+        for its segment and never edits the narration, the segment
+        text, or the grouping - so verification can only change what
+        the viewer sees, never what is spoken or how it is cut.
         """
         self.log(
             f"Generating {len(segments)} visuals, one call per "
-            "sentence..."
+            "segment..."
         )
 
         verify = bool(
             self.generation_config.get("verify_visuals", True)
+        )
+        verification_attempts = max(
+            1,
+            int(
+                self.generation_config.get(
+                    "verification_attempts",
+                    3,
+                )
+            ),
         )
 
         visuals = []
@@ -2284,7 +2205,7 @@ class ContentGenerator(
             feedback = None
             parsed = {}
 
-            while True:
+            for _ in range(verification_attempts):
 
                 prompt = self.build_segment_prompt(
                     scripture,
@@ -2320,6 +2241,13 @@ class ContentGenerator(
                     "re-rolling..."
                 )
                 feedback = reason
+            else:
+
+                self.log(
+                    f"Sentence {index + 1}: visual verification never "
+                    f"passed after {verification_attempts} attempts; "
+                    "shipping the last draft."
+                )
 
             visuals.append(parsed)
 

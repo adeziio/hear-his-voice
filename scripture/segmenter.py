@@ -16,16 +16,6 @@ SENTENCE_SPLIT = re.compile(
 )
 
 
-# A sentence that would overrun one clip is divided at its own
-# punctuation - commas, semicolons, colons, and dashes - into the
-# shorter natural sentences the task asks for. Splitting after the
-# punctuation keeps the clause lossless: rejoining the clauses with a
-# single space reproduces the sentence.
-CLAUSE_SPLIT = re.compile(
-    r"(?<=[,;:])\s+|(?<=\s[-–—])\s+"
-)
-
-
 def _protected_spans(text):
     """
     Character-index (start, end) ranges that fall inside a quotation.
@@ -36,6 +26,23 @@ def _protected_spans(text):
     ranges so a line of spoken dialogue is not broken in half between
     two visuals - "Save us, Lord! We are dying!" is one saying, not
     three.
+
+    A straight quote is classified by its edges: one followed by a
+    letter is a NESTED OPENING, one followed by a space, punctuation,
+    or the end of the text is a close. An opener found inside an open
+    quotation never closes it - narration that quotes two levels with
+    the same mark ('Behold ... 'Make ready ... Lord! Make his paths
+    straight!') keeps ONE span covering the whole saying - and a closer
+    with nothing open (the possessive in "the disciples' boat") opens
+    nothing, so a stray mark cannot swallow every sentence after it.
+    Both failures previously collapsed a dozen complete sentences into
+    one giant "sentence" that no ceiling could group.
+
+    An open quotation that never closes still runs to the end of the
+    text: a cut inside a real saying is the one error this scanner may
+    never make. The ranges here guide sentence-aware readers
+    (split_sentences); the spoken segmentation itself cuts by word
+    count (build_word_segments) and needs no quote handling.
     """
     spans = []
     quote = None
@@ -43,9 +50,17 @@ def _protected_spans(text):
 
     for index, char in enumerate(text):
 
+        following = (
+            text[index + 1]
+            if index + 1 < len(text)
+            else ""
+        )
+
         if char in ('"', "“", "”"):
 
-            if char == "”" or quote == char:
+            # A curly close is unambiguous: it closes whatever
+            # quotation is open, as it always has.
+            if char == "”":
 
                 if start is not None:
 
@@ -54,38 +69,87 @@ def _protected_spans(text):
                 quote = None
                 start = None
 
-            elif quote is None:
+                continue
 
-                quote = char
-                start = index
+            if char == "“":
 
+                if quote is None:
+
+                    quote = char
+                    start = index
+
+                # Already inside a quotation: the mark is content,
+                # not a boundary - never a close, never a re-open.
+                continue
+
+            # char == '"': classified by its edge, like straight '.
+            if quote == '"':
+
+                if following.isalnum():
+
+                    # Nested opening inside a straight-quoted span
+                    # ("I saw "them" leave."): keep the outer span.
+                    continue
+
+                if start is not None:
+
+                    spans.append((start, index + 1))
+
+                quote = None
+                start = None
+
+                continue
+
+            if quote is None:
+
+                if following.isalnum():
+
+                    quote = '"'
+                    start = index
+
+                # A stray close-looking quote opens nothing.
+
+            # Some other quotation is open: this mark is content.
             continue
 
         if char == "'":
 
             previous = text[index - 1] if index else ""
-            following = (
-                text[index + 1]
-                if index + 1 < len(text)
-                else ""
-            )
             is_apostrophe = previous.isalnum() and following.isalnum()
 
-            if not is_apostrophe:
+            if is_apostrophe:
 
-                if quote == "'":
+                continue
 
-                    if start is not None:
+            if quote == "'":
 
-                        spans.append((start, index + 1))
+                if following.isalnum():
 
-                    quote = None
-                    start = None
+                    # Nested opening inside a single-quoted span: not
+                    # the close of the outer saying.
+                    continue
 
-                elif quote is None:
+                if start is not None:
+
+                    spans.append((start, index + 1))
+
+                quote = None
+                start = None
+
+                continue
+
+            if quote is None:
+
+                if following.isalnum():
 
                     quote = "'"
                     start = index
+
+                # A stray close-looking quote - the possessive in
+                # "the disciples' boat" - opens no span, so the
+                # sentences after it are still split normally.
+
+            # Some other quotation is open: this mark is content.
 
     if quote is not None and start is not None:
 
@@ -155,128 +219,40 @@ def split_sentences(text, protected=None):
     ]
 
 
-def split_clauses(sentence, max_words, protected=None):
+def build_word_segments(text, max_words):
     """
-    Breaks one sentence into shorter clauses when it is too long to sit
-    on a single clip.
+    Splits the narration into consecutive word chunks of at most
+    `max_words` words each - the spoken segments that each get their
+    own SnapGenAI visual prompt and clip.
 
-    Only punctuation that is already in the text is used as a break, and
-    the break happens after it, so no word or mark is added, removed,
-    or moved. When ``protected`` is given, no break is made inside those
-    quoted ranges.
+    The ceiling comes from duration_target x words_per_second and is
+    enforced by counting words alone: every chunk except the last
+    holds exactly max_words words, the final chunk holds the remainder
+    (a shorter final chunk is fine), and no chunk is padded to fill a
+    clip.
 
-    A clause that is still longer than ``max_words`` on its own cannot
-    be divided without inventing a boundary the text does not have, so
-    it is returned whole rather than rewritten.
+    A cut may fall mid-sentence and mid-quotation - this is
+    intentional, so any telling can be grouped strictly by spoken
+    length rather than by punctuation. The cut always falls BETWEEN
+    words: runs of whitespace collapse to single spaces, and every
+    word and mark of the narration appears exactly once, in the
+    original order, with nothing omitted, duplicated, or rewritten.
     """
-    text = str(sentence).strip()
+    words = str(text or "").split()
 
-    if (
-        max_words is None
-        or max_words <= 0
-        or len(text.split()) <= max_words
-    ):
+    if not words:
 
-        return [text]
+        return []
 
-    if protected:
+    max_words = max(
+        1,
+        int(max_words)
+    )
 
-        clauses = _split_outside_quotes(
-            text,
-            CLAUSE_SPLIT,
-            protected
-        )
-
-    else:
-
-        clauses = CLAUSE_SPLIT.split(text)
-
-    clauses = [
-        clause.strip()
-        for clause in clauses
-        if clause.strip()
+    return [
+        " ".join(words[start:start + max_words])
+        for start in range(0, len(words), max_words)
     ]
-
-    if not clauses:
-
-        return [text]
-
-    # Regroup the raw clauses into chunks of at most max_words, so a
-    # long run of short clauses still reads as balanced phrases.
-    chunks = []
-    current = []
-
-    for clause in clauses:
-
-        candidate = " ".join(
-            current + [clause]
-        )
-
-        if (
-            current
-            and len(candidate.split()) > max_words
-        ):
-
-            chunks.append(" ".join(current))
-            current = [clause]
-
-        else:
-
-            current.append(clause)
-
-    if current:
-
-        chunks.append(" ".join(current))
-
-    return chunks
-
-
-def build_sentence_segments(text, max_words=None):
-    """
-    Breaks the narration into the spoken segments that each get their
-    own SnapGenAI visual prompt and clip: one segment per completed
-    narration sentence, in the original order.
-
-    `max_words` is the most words one sentence may hold, because a
-    sentence is spoken over exactly one clip and that clip is only
-    `max_words` long. It is a ceiling, never a quota: a sentence shorter
-    than the ceiling is kept whole and never padded, and only a sentence
-    that would overrun the clip is divided - at its own punctuation, into
-    the shorter natural sentences the task asks for, each of which then
-    gets its own visual.
-
-    Only punctuation already in the text is used as a boundary, and the
-    break happens after it, so joining the result with single spaces
-    reproduces the input exactly: the narration and captions still speak
-    every word they were given, in order.
-
-    Cuts are kept out of quotations, so a spoken saying - a cry and the
-    reply it draws - stays whole inside one segment.
-    """
-    value = str(text).strip()
-
-    # Quoted ranges are located in the string actually being split: a
-    # range found in the whole narration would point at the wrong
-    # characters once that narration is cut into sentences.
-    protected = _protected_spans(value)
-
-    segments = []
-
-    for sentence in split_sentences(value, protected):
-
-        # Each sentence is its own string, so its quotations are found
-        # in it - not in the narration it came from.
-        sentence_spans = _protected_spans(sentence)
-
-        segments.extend(
-            split_clauses(
-                sentence,
-                max_words,
-                sentence_spans
-            )
-        )
-
-    return segments
 
 
 def group_into_segments(

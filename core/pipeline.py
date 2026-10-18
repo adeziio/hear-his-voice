@@ -322,13 +322,14 @@ class HearHisVoicePipeline:
             text=narration,
         )
 
-        # One visual per STORY BEAT, not one per sentence: consecutive
-        # narration units that form one moment share a clip, and the
-        # exact narration text of each group becomes that visual's
-        # sentence. Falls back to one-per-sentence when grouping is
-        # switched off or the model never returns a usable partition.
+        # Strict deterministic word-count segmentation: consecutive
+        # chunks of up to duration_target x words_per_second words, cut
+        # between words only - mid-sentence and mid-quotation cuts are
+        # intentional. The chunks are finalized here, before visual
+        # generation; every word of the narration appears exactly once,
+        # in order.
         segments = (
-            self.content_generator.build_story_beat_segments(
+            self.content_generator.build_segments(
                 narration_script
             )
         )

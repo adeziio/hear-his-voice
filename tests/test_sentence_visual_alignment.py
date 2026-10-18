@@ -30,7 +30,7 @@ from ai.content_generator import (
     ContentGenerator,
     ContentGenerationError,
     _duration_target_seconds,
-    _max_words_per_sentence,
+    _max_words_per_segment,
     _words_per_second,
     METADATA_SCHEMA,
     NARRATION_SCHEMA,
@@ -42,7 +42,7 @@ from ai.content_generator import (
 
 from scripture.segmenter import (
     _protected_spans,
-    build_sentence_segments,
+    build_word_segments,
     split_sentences,
 )
 
@@ -411,39 +411,37 @@ def project_config():
     ).load_all()
 
 
-def narration_sentence_count(text):
-    """
-    The number of sentences the narration is really made of, counted the
-    way the segmenter counts them: a quotation is protected, so a spoken
-    saying - "Save us, Lord! We are dying!" - is one sentence, never split
-    at the "!" inside it. This is the baseline a dividing test compares a
-    segment count against, so it must agree with build_sentence_segments.
-    """
-    return len(split_sentences(text, _protected_spans(text)))
-
-
 # --------------------------------------------------------------------
-# duration_target drives the sentence budget
+# duration_target drives the segment word budget
 # --------------------------------------------------------------------
 
-def test_the_sentence_budget_comes_from_duration_target():
+def test_the_segment_budget_comes_from_duration_target():
 
     config = make_config(
         duration_target="8s",
         words_per_second=2.8
     )
 
-    assert _duration_target_seconds(config) == 8.0
-    assert _max_words_per_sentence(config) == 22
+    seconds = _duration_target_seconds(config)
+    rate = _words_per_second(config)
 
-    # A longer clip allows a longer sentence; a shorter one does not.
-    assert _max_words_per_sentence(
+    assert seconds == 8.0
+
+    # The budget is the duration-derived product, never a constant:
+    # a longer clip allows a longer chunk; a shorter one does not.
+    assert _max_words_per_segment(config) == round(rate * seconds)
+
+    assert _max_words_per_segment(
         make_config(duration_target="12s")
-    ) == 34
+    ) == round(2.8 * 12.0)
 
-    assert _max_words_per_sentence(
+    assert _max_words_per_segment(
         make_config(duration_target="4s")
-    ) == 11
+    ) == round(2.8 * 4.0)
+
+    assert _max_words_per_segment(
+        make_config(duration_target="4s")
+    ) < _max_words_per_segment(config)
 
 
 def test_a_missing_or_unparseable_duration_target_falls_back():
@@ -476,95 +474,112 @@ def test_the_committed_project_config_supplies_the_budget(project_config):
 
     assert seconds > 0
 
-    assert _max_words_per_sentence(project_config) == max(
+    assert _max_words_per_segment(project_config) == max(
         1,
         round(_words_per_second(project_config) * seconds)
     )
 
 
 # --------------------------------------------------------------------
-# duration-based splitting
+# strict word-count segmentation
 # --------------------------------------------------------------------
 
-def test_a_shorter_duration_target_yields_more_segments():
+def test_a_shorter_duration_target_yields_more_chunks():
 
-    generator, _ = make_generator(duration_target="4s")
+    # duration_target sets the word budget: the same narration is cut
+    # into more chunks when the clip is short than when it is long.
+    short, _ = make_generator(duration_target="4s")
+    long, _ = make_generator(duration_target="30s")
 
-    short = generator.build_segments({"text": STORM_NARRATION})
-
-    longer = make_generator(duration_target="30s")[0].build_segments(
+    short_chunks = short.build_segments(
+        {"text": STORM_NARRATION}
+    )
+    long_chunks = long.build_segments(
         {"text": STORM_NARRATION}
     )
 
-    assert len(short) > len(longer)
+    assert len(short_chunks) > len(long_chunks)
+
+    # Every chunking covers the narration exactly, whatever the clip.
+    assert " ".join(short_chunks) == STORM_NARRATION
+    assert " ".join(long_chunks) == STORM_NARRATION
 
 
-def test_a_long_sentence_is_divided_to_stay_inside_the_clip():
+def test_text_longer_than_the_clip_is_cut_at_word_boundaries(capsys):
 
+    # Strict word-count grouping: words beyond the budget are cut
+    # BETWEEN words - mid-sentence is intentional - and the count
+    # alone decides where. Nothing is padded and nothing is flagged.
     generator, _ = make_generator(duration_target="4s")
 
-    segments = generator.build_segments({"text": STORM_NARRATION})
+    ceiling = _max_words_per_segment(generator.config)
 
-    # The opening sentence is one long thought; it is divided at its own
-    # comma so no segment runs past its clip. Compared against the true
-    # sentence count (quotation-protected), the long sentence has been
-    # broken up into shorter, natural pieces.
-    sentences = split_sentences(
-        STORM_NARRATION,
-        _protected_spans(STORM_NARRATION),
+    narration = (
+        "The voice of one crying in the wilderness prepares the way "
+        "of the Lord before him and makes his paths straight"
     )
+    total = len(narration.split())
+    assert total > ceiling
 
-    assert len(segments) > len(sentences)
+    segments = generator.build_segments({"text": narration})
 
-    # Every resulting segment is shorter than the sentence it was divided
-    # from: the cut reduced the length. (A clause with no punctuation of
-    # its own is left whole rather than chopped mid-phrase, so a segment
-    # may still exceed the budget when the text gives no natural break -
-    # but it never exceeds the sentence it came from.)
-    longest_sentence_words = max(
-        len(sentence.split())
-        for sentence in sentences
-    )
+    # Full ceiling-sized chunks plus the shorter remainder: the tell
+    # is ONE sentence, so the cut lands inside it by design.
+    expected = [ceiling] * (total // ceiling)
+    if total % ceiling:
+        expected.append(total % ceiling)
 
-    for segment in segments:
+    assert [len(s.split()) for s in segments] == expected
+    assert len(segments) > 1
 
-        assert len(segment.split()) <= longest_sentence_words
+    assert " ".join(segments) == narration
+    assert [
+        word
+        for segment in segments
+        for word in segment.split()
+    ] == narration.split()
+
+    # Word chunks never overrun, so the sentence-review flag has no
+    # reason to fire - the old overlong-sentence failure is gone.
+    captured = capsys.readouterr().out
+    assert "Narration review needed" not in captured
 
 
-def test_a_short_sentence_is_kept_whole_not_padded():
+def test_a_short_telling_is_kept_whole_not_padded():
 
-    # duration_target is a ceiling, never a duration to fill: a sentence
-    # that already fits one clip is not split, merged, or padded.
+    # duration_target is a ceiling, never a duration to fill: a
+    # telling that already fits one clip ships as a single chunk
+    # holding exactly its own words - nothing split, nothing padded.
     generator, _ = make_generator(duration_target="8s")
 
-    segments = generator.build_segments(
-        {"text": "Jesus rose. The wind stopped."}
-    )
+    narration = "Jesus rose. The wind stopped."
+    segments = generator.build_segments({"text": narration})
 
-    assert segments == ["Jesus rose.", "The wind stopped."]
+    assert segments == [narration]
+    assert len(segments[0].split()) == len(narration.split())
 
 
-def test_segments_are_cut_only_at_punctuation():
+def test_chunks_always_cut_between_whole_words():
 
     generator, _ = make_generator(duration_target="4s")
 
     segments = generator.build_segments({"text": STORM_NARRATION})
 
-    # Only punctuation already in the text is used as a boundary, so a
-    # segment never begins or ends on a stray fragment.
+    # A chunk is exactly its words re-spaced: non-empty, stripped,
+    # never a half-word, never a dangling separator at the cut.
     for segment in segments:
 
+        assert segment
         assert segment == segment.strip()
+        assert segment == " ".join(segment.split())
 
-        assert segment[-1] not in " ([{"
-
-    # Rejoined, the text is intact - proof the cuts fell at punctuation.
+    # Rejoined, the text is intact - the cut only removed a space.
     assert " ".join(segments) == STORM_NARRATION
-
-    # The quoted cry is never opened in one segment and closed in the next.
-    for segment in segments:
-
-        assert segment.count("'") != 1
+    assert [
+        word
+        for segment in segments
+        for word in segment.split()
+    ] == STORM_NARRATION.split()
 
 # --------------------------------------------------------------------
 # the narration survives segmentation unchanged
@@ -1068,7 +1083,9 @@ def test_every_visual_is_checked_against_its_sentence():
 
 
 def test_the_visual_check_prompt_carries_query_and_neighbours():
-    generator, _ = make_generator()
+    # A short clip -> more chunks, so the middle segment has both
+    # neighbours to carry.
+    generator, _ = make_generator(duration_target="4s")
 
     segments = generator.build_segments({"text": STORM_NARRATION})
 
@@ -1128,10 +1145,11 @@ def test_a_rejected_visual_is_re_rolled_with_the_rejection_reason():
 
 def test_the_re_roll_loop_runs_until_the_checker_approves():
     """
-    A rejected visual never ships. There is no attempt cap: the loop
-    re-rolls for as long as the checker keeps rejecting - seven
-    rejections in a row (well past any former cap) must produce
-    eight visual calls, and only the approved eighth query ships.
+    A rejected visual is re-rolled up to verification_attempts times;
+    when the checker never approves, the last draft ships instead of
+    looping forever. Seven pre-configured rejections are far more than
+    the cap of three, so only three calls are made and the third draft
+    ships.
     """
     narration = "Jesus stilled the storm."
     generator, stub = make_generator(
@@ -1146,17 +1164,18 @@ def test_the_re_roll_loop_runs_until_the_checker_approves():
         narration=narration,
     )
 
-    assert stub.visual_calls == 8
-    assert len(stub.verification_prompts) == 8
+    # Cap stops the loop at three attempts; the third (rejected) draft
+    # ships instead of an eighth approved call.
+    assert stub.visual_calls == 3
+    assert len(stub.verification_prompts) == 3
 
-    # Every re-roll carried the rejection forward, and only the
-    # checker-approved attempt is what shipped.
+    # Every re-roll carried the rejection forward.
     assert all(
         "YOUR PREVIOUS ANSWER WAS REJECTED" in prompt
         for prompt in stub.visual_prompts[1:]
     )
     assert len(content["visuals"]) == 1
-    assert "Shot 8." in content["visuals"][0]["search_query"]
+    assert "Shot 3." in content["visuals"][0]["search_query"]
 
 
 def test_verification_can_be_switched_off():
@@ -1242,118 +1261,44 @@ def test_a_verdict_we_cannot_parse_counts_as_a_rejection():
     assert reason
 
 
-def test_story_beat_grouping_merges_one_moment_into_one_visual():
+def test_chunks_fill_the_ceiling_before_starting_the_next():
     """
-    The storm and the cry it draws belong on one screen: consecutive
-    narration units that form one moment share a single visual, and
-    the narration itself is carried over word for word.
+    Strict deterministic word counting: every chunk except the last
+    holds exactly the ceiling; only the final chunk may be shorter.
+    No sentence structure decides anything - the word count alone
+    does - and coverage stays exact.
     """
-    generator, stub = make_generator(
-        llm=StubLLM(
-            grouping_replies=[{"groups": [[1, 2], [3]]}]
-        ),
-        # Ceiling of 32 words, so unit 1 (22 words) may share a clip
-        # with unit 2 - the merge is a real choice, not one the
-        # duration cap would split straight back apart.
-        words_per_second=4,
-    )
+    generator, _ = make_generator()
 
-    segments = generator.build_story_beat_segments(
-        {"text": STORM_NARRATION}
-    )
+    ceiling = _max_words_per_segment(generator.config)
+    total = len(STORM_NARRATION.split())
+    assert total > ceiling
 
-    assert len(stub.grouping_prompts) == 1
-    assert len(segments) == 2
+    segments = generator.build_segments({"text": STORM_NARRATION})
 
-    # Compare against the quote-protected units, which are what the
-    # grouping actually operates on: the cry stays whole in unit 2.
-    ceiling = _max_words_per_sentence(generator.config)
-    units = build_sentence_segments(STORM_NARRATION, ceiling)
+    expected = [ceiling] * (total // ceiling)
+    if total % ceiling:
+        expected.append(total % ceiling)
 
-    assert segments[0] == f"{units[0]} {units[1]}"
-    assert segments[1] == units[2]
+    assert [len(s.split()) for s in segments] == expected
 
-    # Complete coverage: the segments ARE the narration, with nothing
+    # Complete coverage: the chunks ARE the narration, with nothing
     # omitted, duplicated, or rewritten.
     assert " ".join(segments) == STORM_NARRATION
 
 
-def test_a_broken_grouping_is_rejected_and_re_rolled_with_the_reason():
+def test_no_chunk_exceeds_the_clip_ceiling():
     """
-    A partition that drops a unit can never be shipped: it is
-    rejected, the reason goes back in the next prompt, and the fixed
-    partition takes its place.
+    No chunk may hold more words than the clip's duration_target
+    ceiling. Every chunk stays within it and every word survives in
+    order.
     """
-    generator, stub = make_generator(
-        llm=StubLLM(
-            grouping_replies=[
-                # Unit 2 is missing - an unusable partition.
-                {"groups": [[1], [3]]},
-                {"groups": [[1, 2], [3]]},
-            ]
-        ),
-        words_per_second=4,
-    )
+    generator, _ = make_generator()
 
-    segments = generator.build_story_beat_segments(
-        {"text": STORM_NARRATION}
-    )
+    segments = generator.build_segments({"text": STORM_NARRATION})
 
-    assert len(stub.grouping_prompts) == 2
+    ceiling = _max_words_per_segment(generator.config)
 
-    rejected = stub.grouping_prompts[1]
-    assert "YOUR PREVIOUS GROUPING WAS REJECTED" in rejected
-    assert "missing unit(s) [2]" in rejected
-    assert len(segments) == 2
-
-
-def test_unusable_grouping_falls_back_to_one_visual_per_sentence():
-    """
-    Fail-safe, not fail-silent: when no attempt returns a usable
-    partition, the old one-visual-per-sentence cut is used - always
-    correct, even if less clever.
-    """
-    generator, stub = make_generator(
-        llm=StubLLM(
-            grouping_replies=[
-                "not json",
-                {"groups": [[1, 9]]},
-                {"groups": "everything"},
-            ]
-        )
-    )
-
-    segments = generator.build_story_beat_segments(
-        {"text": STORM_NARRATION}
-    )
-
-    assert len(stub.grouping_prompts) == 3
-    assert segments == generator.build_segments(
-        {"text": STORM_NARRATION}
-    )
-    assert len(segments) == 3
-
-
-def test_grouping_never_exceeds_the_clip_spoken_ceiling():
-    """
-    duration_target is the MAXIMUM spoken length of a group, never a
-    duration to fill: a group built beyond it is cut back at unit
-    boundaries - never inside a unit - and every word survives.
-    """
-    generator, stub = make_generator(
-        llm=StubLLM(
-            grouping_replies=[{"groups": [[1, 2, 3]]}]
-        )
-    )
-
-    segments = generator.build_story_beat_segments(
-        {"text": STORM_NARRATION}
-    )
-
-    ceiling = _max_words_per_sentence(generator.config)
-
-    assert len(stub.grouping_prompts) == 1
-    assert len(segments) == 2
     assert all(
         len(segment.split()) <= ceiling
         for segment in segments
@@ -1361,23 +1306,166 @@ def test_grouping_never_exceeds_the_clip_spoken_ceiling():
     assert " ".join(segments) == STORM_NARRATION
 
 
-def test_story_beat_grouping_can_be_switched_off():
-    generator, stub = make_generator(
-        llm=StubLLM(),
-        story_beat_grouping=False,
+def test_chunks_keep_every_word_in_order():
+    """
+    Joining the chunks with single spaces reproduces the narration
+    exactly - no word omitted, duplicated, or reordered.
+    """
+    generator, _ = make_generator()
+
+    for narration in (
+        STORM_NARRATION,
+        EPISODE_001_NARRATION,
+        MARK_002_NARRATION,
+        "Jesus went up onto the mountain by himself to pray and stayed "
+        "there all night. His disciples crossed the sea to meet him at "
+        "dawn.",
+    ):
+
+        segments = generator.build_segments({"text": narration})
+
+        assert " ".join(segments) == narration
+        assert [
+            word
+            for segment in segments
+            for word in segment.split()
+        ] == narration.split()
+
+
+def test_cuts_can_fall_inside_sentences_and_quotations():
+    """
+    Mid-sentence and mid-quotation cuts are intentional: grouping is
+    strictly by word count. A cut crosses a real sentence boundary,
+    and a quotation longer than the ceiling necessarily spans chunks
+    - neither may be protected from the cut.
+    """
+    generator, _ = make_generator(duration_target="4s")
+
+    segments = generator.build_segments({"text": STORM_NARRATION})
+
+    # STORM's opening sentence is longer than this clip's budget, so
+    # at least one chunk is NOT a whole number of complete sentences -
+    # proof the sentence boundary does not shield text from a cut.
+    sentences = split_sentences(
+        STORM_NARRATION,
+        _protected_spans(STORM_NARRATION),
+    )
+    sentence_runs = {
+        " ".join(sentences[start:end])
+        for start in range(len(sentences))
+        for end in range(start + 1, len(sentences) + 1)
+    }
+
+    assert any(
+        segment not in sentence_runs
+        for segment in segments
     )
 
-    segments = generator.build_story_beat_segments(
-        {"text": STORM_NARRATION}
+    # A quotation longer than the ceiling spans chunk boundaries: no
+    # single chunk can hold it whole, and coverage still holds.
+    generator, _ = make_generator()
+    ceiling = _max_words_per_segment(generator.config)
+
+    long_quotation = (
+        "'After me comes he who is mightier than I, the strap of whose "
+        "sandals I am not worthy to stoop down and loosen. I baptized "
+        "you in water, but he will baptize you in the Holy Spirit.'"
+    )
+    assert len(long_quotation.split()) > ceiling
+
+    segments = generator.build_segments({"text": MARK_002_NARRATION})
+
+    assert all(
+        long_quotation not in segment
+        for segment in segments
+    )
+    assert long_quotation in MARK_002_NARRATION
+    assert " ".join(segments) == MARK_002_NARRATION
+
+
+# --------------------------------------------------------------------
+# build_word_segments: strict word-count chunking (unit tests)
+# --------------------------------------------------------------------
+
+
+def test_build_word_segments_fills_the_ceiling_then_continues():
+    """
+    Strict word counting: each chunk holds exactly max_words words
+    until the remainder, which may be shorter.
+    """
+    chunks = build_word_segments("One two three four five six seven.", 3)
+
+    assert chunks == [
+        "One two three",
+        "four five six",
+        "seven.",
+    ]
+
+
+def test_build_word_segments_never_exceeds_the_ceiling():
+    """
+    No chunk's word count may exceed max_words - the count is the
+    only rule.
+    """
+    text = "Alpha beta gamma delta epsilon zeta eta theta."
+
+    chunks = build_word_segments(text, 5)
+
+    assert all(
+        len(chunk.split()) <= 5
+        for chunk in chunks
+    )
+    assert " ".join(chunks) == text
+
+
+def test_build_word_segments_short_text_is_one_chunk():
+    """
+    The ceiling is a maximum, never a quota: a text that fits ships
+    as a single chunk, unpadded.
+    """
+    assert build_word_segments("Short and whole.", 100) == [
+        "Short and whole."
+    ]
+
+
+def test_build_word_segments_preserves_all_text_in_order():
+    """
+    Joining every chunk with single spaces reproduces the input
+    exactly - no omission, duplication, or reordering - even when a
+    cut lands inside a sentence or quotation.
+    """
+    text = (
+        "'Save us, Lord! We are dying!' he cried, and the sea "
+        "grew calm before them."
     )
 
-    assert not stub.grouping_prompts
-    assert len(segments) == 3
+    chunks = build_word_segments(text, 4)
+
+    assert " ".join(chunks) == text
+    assert [
+        word
+        for chunk in chunks
+        for word in chunk.split()
+    ] == text.split()
+
+
+def test_build_word_segments_empty_input():
+    assert build_word_segments("", 10) == []
+    assert build_word_segments("   \n  ", 10) == []
+
+
+def test_build_word_segments_single_chunk_at_the_ceiling():
+    assert build_word_segments("One two three four.", 4) == [
+        "One two three four."
+    ]
 
 
 def test_the_grouping_prompt_names_the_units_the_ceiling_and_the_feedback():
     generator, _ = make_generator()
-    units = build_sentence_segments(STORM_NARRATION, 22)
+    units = split_sentences(
+        STORM_NARRATION,
+        _protected_spans(STORM_NARRATION),
+    )
 
     prompt = generator.build_grouping_prompt(
         {
@@ -1399,64 +1487,6 @@ def test_the_grouping_prompt_names_the_units_the_ceiling_and_the_feedback():
     assert STORM_NARRATION in prompt
 
 
-def test_an_all_single_sentence_grouping_is_re_rolled_when_merging_was_possible():
-    """
-    The exact failure this feature exists for: a partition with one
-    unit per visual is rejected while some pair of units would have
-    fit one clip, and the re-roll carries the reason.
-    """
-    generator, stub = make_generator(
-        llm=StubLLM(
-            grouping_replies=[
-                {"groups": [[1], [2], [3]]},
-                {"groups": [[1, 2], [3]]},
-            ]
-        ),
-        # Ceiling of 32 words: units 1 and 2 (22 + 10) could share.
-        words_per_second=4,
-    )
-
-    segments = generator.build_story_beat_segments(
-        {"text": STORM_NARRATION}
-    )
-
-    assert len(stub.grouping_prompts) == 2
-    assert "Every group held a single unit" in stub.grouping_prompts[1]
-    assert len(segments) == 2
-
-
-def test_single_sentence_groups_are_kept_when_no_pair_fits_one_clip():
-    """
-    The merge rule never overrules the duration ceiling: when every
-    consecutive pair would overrun the clip, one visual per unit is
-    the correct cut and stands on the first attempt.
-    """
-    narration = (
-        "The disciples gathered the fragments that remained and "
-        "filled twelve baskets with the pieces from the meal that "
-        "day. Then he sent the crowds away and went up the mountain "
-        "alone to pray while the evening came upon the shore. "
-        "The boat was out in the middle of the sea by then, beaten "
-        "by the waves as the wind drove against it in the night."
-    )
-
-    generator, stub = make_generator(
-        llm=StubLLM(
-            grouping_replies=[
-                {"groups": [[1], [2], [3], [4]]}
-            ]
-        )
-    )
-
-    segments = generator.build_story_beat_segments(
-        {"text": narration}
-    )
-
-    assert len(stub.grouping_prompts) == 1
-    assert len(segments) == 4
-    assert " ".join(segments) == narration
-
-
 def test_the_real_episode_units_and_their_fitting_pairs():
     """
     Regression for the shipped episode: its 15 narration units and the
@@ -1467,8 +1497,11 @@ def test_the_real_episode_units_and_their_fitting_pairs():
     me!" (22 words). Every other boundary legally exceeds the clip.
     """
     config = make_config()
-    max_words = _max_words_per_sentence(config)
-    units = build_sentence_segments(EPISODE_001_NARRATION, max_words)
+    max_words = _max_words_per_segment(config)
+    units = split_sentences(
+        EPISODE_001_NARRATION,
+        _protected_spans(EPISODE_001_NARRATION),
+    )
 
     assert len(units) == 15
 
@@ -1501,8 +1534,11 @@ def test_the_grouping_prompt_lists_every_pair_that_fits_one_clip():
     """
     generator, _ = make_generator()
     config = make_config()
-    max_words = _max_words_per_sentence(config)
-    units = build_sentence_segments(EPISODE_001_NARRATION, max_words)
+    max_words = _max_words_per_segment(config)
+    units = split_sentences(
+        EPISODE_001_NARRATION,
+        _protected_spans(EPISODE_001_NARRATION),
+    )
 
     prompt = generator.build_grouping_prompt(
         {"text": EPISODE_001_NARRATION},
@@ -1519,59 +1555,38 @@ def test_the_grouping_prompt_lists_every_pair_that_fits_one_clip():
     assert "units 4 + 5" not in prompt
 
 
-def test_the_episode_regression_merges_beats_after_an_all_single_sentence_reply():
+def test_matthew_14_chunks_respect_the_ceiling():
     """
-    The shipped failure as a regression: the episode's visuals were
-    cut one per unit. The model's default all-singleton reply is
-    rejected; on the re-roll it merges exactly the fitting beat pairs
-    - the mountain prayer with the evening, Peter's request with
-    "Come!", and the sinking with the cry for help - while coverage
-    stays exact and no clip overruns the ceiling.
+    Matthew 14:22-33 corpus (episode 001's narration): strict word
+    chunks respect the duration-derived ceiling, fill it exactly
+    before starting the next chunk, and cover every word of the
+    narration once, in order.
     """
-    generator, stub = make_generator(
-        llm=StubLLM(
-            grouping_replies=[
-                {"groups": [[i] for i in range(1, 16)]},
-                {
-                    "groups": [
-                        [1],
-                        [2, 3],
-                        [4],
-                        [5],
-                        [6],
-                        [7],
-                        [8, 9],
-                        [10],
-                        [11, 12],
-                        [13],
-                        [14],
-                        [15],
-                    ]
-                },
-            ]
-        )
-    )
+    generator, _ = make_generator()
 
-    segments = generator.build_story_beat_segments(
+    ceiling = _max_words_per_segment(generator.config)
+    total = len(EPISODE_001_NARRATION.split())
+    assert total > ceiling
+
+    segments = generator.build_segments(
         {"text": EPISODE_001_NARRATION}
     )
 
-    assert len(stub.grouping_prompts) == 2
-    assert "Every group held a single unit" in stub.grouping_prompts[1]
+    expected = [ceiling] * (total // ceiling)
+    if total % ceiling:
+        expected.append(total % ceiling)
 
-    max_words = _max_words_per_sentence(make_config())
-    units = build_sentence_segments(EPISODE_001_NARRATION, max_words)
-
-    assert len(segments) == 12
-    assert " ".join(segments) == EPISODE_001_NARRATION
+    assert [len(s.split()) for s in segments] == expected
     assert all(
-        len(segment.split()) <= max_words
+        len(segment.split()) <= ceiling
         for segment in segments
     )
-    # The three pairs the shipped episode cut incorrectly.
-    assert segments[1] == units[1] + " " + units[2]
-    assert segments[6] == units[7] + " " + units[8]
-    assert segments[8] == units[10] + " " + units[11]
+    assert " ".join(segments) == EPISODE_001_NARRATION
+    assert [
+        word
+        for segment in segments
+        for word in segment.split()
+    ] == EPISODE_001_NARRATION.split()
 
 
 def test_the_visual_checker_covers_the_shipped_crowd_boarding_failure():
@@ -1697,4 +1712,663 @@ def test_a_shipped_bad_visual_is_re_rolled_with_the_checkers_reason(
     # The corrected query is what shipped for that sentence.
     assert content["visuals"][index]["search_query"] == fixed_query
     assert bad_query not in content["visuals"][index]["search_query"]
+
+
+def test_cap_group_words_rejects_oversized_group_never_truncates():
+    """
+    _cap_group_words is fail-closed: a group whose units would speak
+    longer than one clip is rejected outright - never truncated or cut
+    to fit. A compliant partition keeps every segment within the
+    ceiling while covering every word.
+    """
+    narration = (
+        "Jesus went up onto the mountain by himself to pray and stayed "
+        "there all night. His disciples crossed the sea to meet him at "
+        "dawn."
+    )
+    generator, _ = make_generator()
+
+    ceiling = _max_words_per_segment(generator.config)
+    units = split_sentences(
+        narration,
+        _protected_spans(narration),
+    )
+
+    # 15 + 10 = 25 words, over the 22-word ceiling: rejected outright.
+    capped = ContentGenerator._cap_group_words(
+        [[1, 2]],
+        units,
+        ceiling,
+    )
+    assert capped is None
+
+    # Re-split respects the ceiling: 15 words and 10 words.
+    capped = ContentGenerator._cap_group_words(
+        [[1], [2]],
+        units,
+        ceiling,
+    )
+    assert capped == [[1], [2]]
+
+    segments = [" ".join(units[i - 1] for i in group) for group in capped]
+    assert all(len(segment.split()) <= ceiling for segment in segments)
+    assert " ".join(segments) == narration
+
+
+def test_cap_group_words_merges_small_fragments():
+    """
+    _cap_group_words merges adjacent small groups whose combined word
+    count fits the ceiling, so a tiny leftover fragment is absorbed by
+    its neighbor instead of shipping as its own visual.
+    """
+    generator, _ = make_generator()
+
+    units = [
+        "One short sentence here.",
+        "Another short one.",
+        "A third short sentence to round things out nicely.",
+    ]
+    ceiling = 20
+
+    # [1] + [2] = 9 words, fits; then [1,2] + [3] = 19 words also fits,
+    # so greedy merging absorbs all three into one group.
+    capped = ContentGenerator._cap_group_words(
+        [[1], [2], [3]],
+        units,
+        ceiling,
+    )
+
+    assert capped == [[1, 2, 3]]
+    segments = [" ".join(units[i - 1] for i in group) for group in capped]
+    assert " ".join(segments) == " ".join(units)
+
+
+def test_small_fragment_groups_are_merged_when_they_fit():
+    """
+    _cap_group_words merges adjacent small groups whose combined word
+    count fits the ceiling, so a tiny leftover fragment is absorbed by
+    its neighbor instead of shipping as its own visual. A group that
+    overruns the ceiling is rejected outright - never truncated.
+    Coverage stays exact: every unit appears once, in order.
+    """
+    generator, _ = make_generator()
+    max_words = _max_words_per_segment(generator.config)
+
+    u_long = " ".join(["word"] * 20)
+    u_tiny = "word"
+    units = [u_long, u_tiny, " ".join(["word"] * 20)]
+
+    merged = generator._cap_group_words([[1], [2], [3]], units, max_words)
+
+    # The tiny fragment merges with its neighbor; the long unit stays
+    # separate because 20 + 20 would overrun the ceiling.
+    assert merged == [[1, 2], [3]]
+
+    # An over-ceiling group is rejected outright, never truncated.
+    assert generator._cap_group_words([[1, 2, 3]], units, max_words) is None
+
+    # Exact coverage: every unit appears once, in ascending order.
+    flat = [item for group in merged for item in group]
+    assert flat == [1, 2, 3]
+
+
+def test_a_long_narration_splits_evenly_across_chunks(capsys):
+    """
+    A narration longer than one clip is cut at the word boundary the
+    budget allows - even when that leaves a tiny final chunk. The
+    narration stays word-for-word intact and no sentence-review flag
+    fires: the count can never overrun the ceiling.
+    """
+    narration = (
+        "Jesus went up onto the mountain by himself to pray and he "
+        "remained there alone all through the night while the disciples "
+        "struggled"
+    )
+    generator, _ = make_generator()
+
+    ceiling = _max_words_per_segment(generator.config)
+    total = len(narration.split())
+    assert total > ceiling
+
+    segments = generator.build_segments({"text": narration})
+
+    assert [len(s.split()) for s in segments] == [
+        ceiling,
+        total - ceiling,
+    ]
+    assert " ".join(segments) == narration
+    assert [
+        word
+        for segment in segments
+        for word in segment.split()
+    ] == narration.split()
+
+    captured = capsys.readouterr().out
+    assert "Narration review needed" not in captured
+
+
+def test_a_cut_can_fall_inside_a_quotation():
+    """
+    Mid-quotation cuts are intentional: the word count decides, not
+    the quotation marks. With a five-word budget the first chunk ends
+    inside the saying - the saying spans two chunks - while coverage
+    and order stay exactly intact.
+    """
+    narration = 'Jesus said, "Come to me now." Peter stepped out.'
+    generator, _ = make_generator(
+        words_per_second=1,
+        duration_target="5s",
+    )
+
+    ceiling = _max_words_per_segment(generator.config)
+
+    segments = generator.build_segments({"text": narration})
+
+    assert [len(s.split()) for s in segments] == (
+        [ceiling] * (len(narration.split()) // ceiling)
+        + (
+            [len(narration.split()) % ceiling]
+            if len(narration.split()) % ceiling
+            else []
+        )
+    )
+
+    # The saying is not whole in any single chunk - it was cut.
+    assert all(
+        '"Come to me."' not in segment
+        for segment in segments
+    )
+
+    assert " ".join(segments) == narration
+    assert all(
+        len(segment.split()) <= ceiling
+        for segment in segments
+    )
+
+
+def test_no_chunk_exceeds_the_ceiling_with_exact_coverage():
+    """
+    Every chunk stays within the clip's spoken ceiling, fills it
+    before the next chunk begins, and the chunks cover the whole
+    narration exactly once in order - nothing omitted, duplicated,
+    or rewritten.
+    """
+    narration = (
+        "The beginning of the gospel of Jesus Christ. John came "
+        "baptizing in the wilderness. Jesus came from Nazareth and was "
+        "baptized by John in the Jordan. The heavens opened and the "
+        "Spirit descended like a dove. A voice came from the sky "
+        'saying, "You are my beloved Son."'
+    )
+    generator, _ = make_generator()
+
+    segments = generator.build_segments({"text": narration})
+
+    ceiling = _max_words_per_segment(generator.config)
+    total = len(narration.split())
+
+    assert all(
+        len(segment.split()) <= ceiling for segment in segments
+    )
+
+    expected = [ceiling] * (total // ceiling)
+    if total % ceiling:
+        expected.append(total % ceiling)
+
+    assert [len(s.split()) for s in segments] == expected
+    assert " ".join(segments) == narration
+
+
+def test_genealogy_and_ordinary_narration_stay_within_the_ceiling():
+    """
+    Sanity for a list-like (genealogy) narration and an ordinary
+    narrative: every segment fits the ceiling and coverage is exact.
+    """
+    generator, _ = make_generator()
+
+    genealogy = (
+        "Abraham was the father of Isaac. Isaac was the father of "
+        "Jacob. Jacob was the father of Judah and his brothers. Judah "
+        "was the father of Perez and Zerah."
+    )
+    ordinary = (
+        "Jesus sent the crowds away and told his disciples to get into "
+        "a boat and go ahead of him. He went up onto a mountain by "
+        "himself to pray."
+    )
+
+    for narration in (genealogy, ordinary):
+
+        segments = generator.build_segments(
+            {"text": narration
+            }
+        )
+
+        ceiling = _max_words_per_segment(generator.config)
+
+        assert all(
+            len(segment.split()) <= ceiling for segment in segments
+        )
+        assert " ".join(segments) == narration
+
+
+def test_matthew_14_ordinary_narrative_alignment():
+    """
+    Regression for Matthew 14:22-33: ordinary narrative events align
+    one visual per duration-grouped segment, with Jesus named
+    explicitly and no action displaced to the wrong moment.
+    """
+    generator, _ = make_generator()
+
+    narration = (
+        "Jesus sent the crowds away and told his disciples to get into "
+        "a boat and go ahead of him. He went up onto a mountain by "
+        "himself to pray. When evening came, he was alone there. But "
+        "the boat was now in the middle of the sea, struggling against "
+        "the waves as the wind blew strongly against them. In the "
+        "fourth watch of the night, Jesus came walking on the water "
+        "toward them. When the disciples saw him, they were terrified "
+        "and cried out, thinking it was a ghost. Immediately Jesus "
+        "spoke to them, saying, 'Cheer up! It is I! Don't be afraid.' "
+        "Peter answered, 'Lord, if it is you, command me to come to "
+        "you on the water.' He said, 'Come!' Peter stepped down from "
+        "the boat and walked on the water toward Jesus. But when he "
+        "saw how strong the wind was, he became afraid and began to "
+        "sink. He cried out, 'Lord, save me!' Immediately Jesus "
+        "reached out his hand, took hold of him, and said, 'You of "
+        "little faith, why did you doubt?' When they got into the "
+        "boat, the wind ceased. Those in the boat came and worshiped "
+        "him, saying, 'You are truly the Son of God!'"
+    )
+
+    segments = generator.build_segments(
+        {"text": narration}
+    )
+
+    ceiling = _max_words_per_segment(generator.config)
+
+    assert all(
+        len(segment.split()) <= ceiling for segment in segments
+    )
+    assert " ".join(segments) == narration
+
+    # No segment reduces Jesus to an unnamed stand-in such as "a lone
+    # figure" or "a solitary figure" wherever the passage names him.
+    for segment in segments:
+
+        assert "a lone figure" not in segment, (
+            f"Unnamed stand-in for Jesus: {segment!r}"
+        )
+        assert "a solitary figure" not in segment, (
+            f"Unnamed stand-in for Jesus: {segment!r}"
+        )
+
+
+def test_one_visual_per_duration_group():
+    """
+    Exactly one visual prompt is generated per narration group: the
+    number of visuals equals the number of segments, and each visual's
+    sentence matches its segment exactly, in order.
+    """
+    generator, stub = make_generator()
+
+    narration = (
+        "Jesus sent the crowds away and told his disciples to get into "
+        "a boat and go ahead of him. He went up onto a mountain by "
+        "himself to pray."
+    )
+
+    segments = generator.build_segments(
+        {"text": narration}
+    )
+
+    content = generator.generate(
+        scripture(reference="Matthew 14:22-33"),
+        segments,
+        narration=narration,
+    )
+
+    assert len(content["visuals"]) == len(segments)
+
+    for index, segment in enumerate(segments):
+
+        assert content["visuals"][index]["sentence"] == segment
+
+
+# --------------------------------------------------------------------
+# word-count segmentation: duration limits, coverage, reroll safety
+# --------------------------------------------------------------------
+
+# A mix of short sentences and one sentence longer than a small clip,
+# so both sides of the rule are exercised: ceiling-filling word cuts,
+# and a long sentence divided at word boundaries rather than kept
+# whole.
+MIXED_NARRATION = (
+    "Jesus rose. The wind stopped. The voice of one crying in the "
+    "wilderness prepares the way of the Lord before him and makes his "
+    "paths straight. The disciples were amazed."
+)
+
+
+def test_chunks_cover_exact_words_at_any_duration():
+    """
+    At every configured clip length, chunks reproduce the narration
+    word for word in order, hold at most the duration-derived budget,
+    and fill it exactly before the next chunk begins - sentence and
+    quotation boundaries change nothing.
+    """
+    for duration in ("4s", "8s", "12s", "30s"):
+
+        generator, _ = make_generator(duration_target=duration)
+
+        ceiling = _max_words_per_segment(generator.config)
+        total = len(MIXED_NARRATION.split())
+
+        segments = generator.build_segments({"text": MIXED_NARRATION})
+
+        # Exact coverage and ordering, word for word.
+        assert " ".join(segments) == MIXED_NARRATION
+        assert [
+            word
+            for segment in segments
+            for word in segment.split()
+        ] == MIXED_NARRATION.split()
+
+        # Strict ceiling: within budget, filling it exactly.
+        expected = [ceiling] * (total // ceiling)
+        if total % ceiling:
+            expected.append(total % ceiling)
+
+        assert [len(s.split()) for s in segments] == expected
+        assert all(
+            len(segment.split()) <= ceiling
+            for segment in segments
+        )
+
+
+def test_duration_limits_fill_exactly_without_padding(capsys):
+    """
+    The ceiling (duration_target x words_per_second) is what ends
+    every chunk: each chunk fills the ceiling before the next begins,
+    the last chunk holds only the remainder, and the chunks hold
+    exactly the narration's own words - nothing padded, nothing
+    flagged - even though the fixture contains a sentence longer than
+    one clip.
+    """
+    generator, _ = make_generator(
+        words_per_second=2,
+        duration_target="8s",
+    )
+
+    ceiling = _max_words_per_segment(generator.config)
+    total = len(MIXED_NARRATION.split())
+
+    segments = generator.build_segments({"text": MIXED_NARRATION})
+
+    # The fixture really does contain a sentence longer than one clip.
+    assert any(
+        len(sentence.split()) > ceiling
+        for sentence in split_sentences(
+            MIXED_NARRATION,
+            _protected_spans(MIXED_NARRATION),
+        )
+    )
+
+    # Strict filling: full ceiling-sized chunks plus the remainder.
+    expected = [ceiling] * (total // ceiling)
+    if total % ceiling:
+        expected.append(total % ceiling)
+
+    assert [len(s.split()) for s in segments] == expected
+
+    # No padding and no over-ceiling chunk: the long sentence was
+    # divided at word boundaries, not kept whole or flagged.
+    assert sum(
+        len(segment.split())
+        for segment in segments
+    ) == total
+    assert " ".join(segments) == MIXED_NARRATION
+    assert all(
+        len(segment.split()) <= ceiling
+        for segment in segments
+    )
+
+    captured = capsys.readouterr().out
+    assert "Narration review needed" not in captured
+
+
+def test_visual_rerolls_preserve_finalized_chunks():
+    """
+    Segmentation is finalized before visual generation: a verification
+    reroll repairs only the visual prompt. The finalized chunks come
+    back byte for byte, the narration is untouched, every chunk still
+    gets exactly one visual, and each reroll prompt still carries the
+    finalized chunks' exact text - never a regrouped one.
+    """
+    generator, stub = make_generator(
+        llm=StubLLM(
+            # One rejection then approval per segment: rerolls happen
+            # for every chunk.
+            verifications=[False, True, False, True],
+        )
+    )
+
+    segments = generator.build_segments(
+        {"text": STORM_NARRATION}
+    )
+
+    assert len(segments) >= 2
+
+    finalized = list(segments)
+
+    content = generator.generate(
+        scripture(reference="Mark 4:35-41"),
+        segments,
+        narration=STORM_NARRATION,
+    )
+
+    # The finalized chunks are unchanged - same text, same order, same
+    # count - and still exactly the deterministic word-count result.
+    ceiling = _max_words_per_segment(generator.config)
+    assert segments == finalized
+    assert segments == build_word_segments(STORM_NARRATION, ceiling)
+
+    # The narration shipped verbatim; nothing was rewritten by the
+    # visual checks.
+    assert content["narration"] == STORM_NARRATION
+
+    # Exactly one visual per finalized group, each paired with its own
+    # segment text, in order.
+    assert len(content["visuals"]) == len(finalized)
+
+    for index, segment in enumerate(finalized):
+
+        assert content["visuals"][index]["sentence"] == segment
+
+    # Two calls per segment: a rejection followed by the re-roll.
+    assert len(stub.visual_prompts) == 2 * len(finalized)
+    assert len(stub.verification_prompts) == 2 * len(finalized)
+
+    for first_attempt in range(0, len(stub.visual_prompts), 2):
+
+        reroll = stub.visual_prompts[first_attempt + 1]
+
+        assert "YOUR PREVIOUS ANSWER WAS REJECTED" in reroll
+
+        # The reroll still directs the SAME finalized segments, with
+        # their neighbors from the finalized grouping - never a
+        # different or regrouped unit of narration.
+        for segment in finalized:
+
+            assert segment in reroll
+
+
+# --------------------------------------------------------------------
+# regression: episode 002 (Mark 1:1-11) quote-boundary collapse
+# --------------------------------------------------------------------
+
+# Verbatim from media/output/shorts/002/content.json, kept as the
+# regression case: this narration quotes two levels with the same
+# straight mark ('Behold ... 'Make ready ... straight!'), which the
+# old quote scanner misread - the inner opener closed the outer saying
+# and the real closer opened a runaway span that swallowed six
+# complete sentences, shipping blobs of 37/91/69 words where the
+# ceiling allows about 22.
+MARK_002_NARRATION = (
+    "The beginning of the Good News of Jesus Christ, the Son of God. As "
+    "it is written in the prophets, 'Behold, I send my messenger before "
+    "your face, who will prepare your way before you: the voice of one "
+    "crying in the wilderness, 'Make ready the way of the Lord! Make his "
+    "paths straight!' John came baptizing in the wilderness and preaching "
+    "the baptism of repentance for forgiveness of sins. All the country "
+    "of Judea and all those of Jerusalem went out to him. They were "
+    "baptized by him in the Jordan river, confessing their sins. John was "
+    "clothed with camel\u2019s hair and a leather belt around his waist. He "
+    "ate locusts and wild honey. He preached, saying, 'After me comes he "
+    "who is mightier than I, the strap of whose sandals I am not worthy "
+    "to stoop down and loosen. I baptized you in water, but he will "
+    "baptize you in the Holy Spirit.' In those days, Jesus came from "
+    "Nazareth of Galilee, and was baptized by John in the Jordan. "
+    "Immediately coming up from the water, he saw the heavens parting and "
+    "the Spirit descending on him like a dove. A voice came out of the "
+    "sky, 'You are my beloved Son, in whom I am well pleased.'"
+)
+
+
+def test_nested_quotation_marks_keep_sentence_boundaries():
+    """
+    Two quotation levels quoted with the same straight mark (the Mark 1
+    pattern): the inner opener must not close the outer saying, and the
+    outer closer must not open a runaway span over the sentences that
+    follow. The saying stays whole as one sentence; the next sentence
+    splits out at its own period.
+    """
+    narration = (
+        "As it is written, 'Behold, I send my messenger before your "
+        "face; the voice of one crying in the wilderness, 'Make ready "
+        "the way of the Lord! Make his paths straight!' John came "
+        "baptizing in the wilderness."
+    )
+
+    sentences = split_sentences(
+        narration,
+        _protected_spans(narration),
+    )
+
+    assert sentences == [
+        "As it is written, 'Behold, I send my messenger before your "
+        "face; the voice of one crying in the wilderness, 'Make ready "
+        "the way of the Lord! Make his paths straight!'",
+        "John came baptizing in the wilderness.",
+    ]
+    assert " ".join(sentences) == narration
+
+
+def test_a_stray_quote_closer_does_not_swallow_following_sentences():
+    """
+    A close-looking quote with nothing open - the possessive in "the
+    disciples' boat" - must open no protected span. Otherwise every
+    sentence after it collapses into one giant blob that no ceiling can
+    group.
+    """
+    narration = (
+        "They followed behind the boat's wake all morning. "
+        "He walked beside the disciples' boat in the shallows. "
+        "The wind stopped at noon."
+    )
+
+    sentences = split_sentences(
+        narration,
+        _protected_spans(narration),
+    )
+
+    assert len(sentences) == 3
+    assert " ".join(sentences) == narration
+
+
+def test_mark_002_chunks_respect_the_ceiling(capsys):
+    """
+    Regression for the shipped Mark 1:1-11 episode (002): blobs of
+    37/91/69 words against a ~22-word ceiling. With word-count
+    chunking, every chunk is at most the ceiling, every word appears
+    exactly once in order, and nothing is flagged - chunking cuts at
+    word boundaries regardless of quotation structure.
+    """
+    generator, _ = make_generator()
+
+    ceiling = _max_words_per_segment(generator.config)
+
+    segments = generator.build_segments(
+        {"text": MARK_002_NARRATION}
+    )
+
+    # Exact coverage and ordering: every word once, in order.
+    assert " ".join(segments) == MARK_002_NARRATION
+    assert [
+        word
+        for segment in segments
+        for word in segment.split()
+    ] == MARK_002_NARRATION.split()
+
+    # Strict ceiling: full ceiling-sized chunks plus the remainder.
+    total = len(MARK_002_NARRATION.split())
+    expected = [ceiling] * (total // ceiling)
+    if total % ceiling:
+        expected.append(total % ceiling)
+
+    assert [len(s.split()) for s in segments] == expected
+    assert all(
+        len(segment.split()) <= ceiling
+        for segment in segments
+    )
+
+    # No flagging: word-count chunking cuts at word boundaries, it
+    # does not flag over-ceiling text for narration review.
+    captured = capsys.readouterr().out
+    assert "Narration review needed" not in captured
+
+
+def test_an_unclosed_quotation_chunks_by_word_count(capsys):
+    """
+    An unclosed quotation is chunked by word count like any other
+    text - cuts may fall mid-quotation, which is intentional for
+    word-count-based segmentation. Nothing is flagged.
+    """
+    generator, _ = make_generator()
+
+    narration = (
+        "Jesus said, 'The hour has come, and the night walks. "
+        "Whoever walks in the night does not see where he goes. "
+        "The light is with you only a little while longer."
+    )
+
+    ceiling = _max_words_per_segment(generator.config)
+    assert len(narration.split()) > ceiling
+
+    segments = generator.build_segments({"text": narration})
+
+    # Exact coverage and ordering: every word once, in order.
+    assert " ".join(segments) == narration
+    assert [
+        word
+        for segment in segments
+        for word in segment.split()
+    ] == narration.split()
+
+    # Strict ceiling: full ceiling-sized chunks plus the remainder.
+    total = len(narration.split())
+    expected = [ceiling] * (total // ceiling)
+    if total % ceiling:
+        expected.append(total % ceiling)
+
+    assert [len(s.split()) for s in segments] == expected
+    assert all(
+        len(segment.split()) <= ceiling
+        for segment in segments
+    )
+
+    # No flagging: word-count chunking does not flag for review.
+    captured = capsys.readouterr().out
+    assert "Narration review needed" not in captured
+
 
