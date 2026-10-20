@@ -2004,6 +2004,740 @@ def test_matthew_14_ordinary_narrative_alignment():
         )
 
 
+# --------------------------------------------------------------------
+# Matthew 14:22-33 regression: character positions in visual prompts
+# --------------------------------------------------------------------
+
+MATTHEW_14_NARRATION = (
+    "Jesus sent the crowds away and told his disciples to get into "
+    "a boat and go ahead of him. He went up onto a mountain by "
+    "himself to pray. When evening came, he was alone there. But "
+    "the boat was now in the middle of the sea, struggling against "
+    "the waves as the wind blew strongly against them. In the "
+    "fourth watch of the night, Jesus came walking on the water "
+    "toward them. When the disciples saw him, they were terrified "
+    "and cried out, thinking it was a ghost. Immediately Jesus "
+    "spoke to them, saying, 'Cheer up! It is I! Don't be afraid.' "
+    "Peter answered, 'Lord, if it is you, command me to come to "
+    "you on the water.' He said, 'Come!' Peter stepped down from "
+    "the boat and walked on the water toward Jesus. But when he "
+    "saw how strong the wind was, he became afraid and began to "
+    "sink. He cried out, 'Lord, save me!' Immediately Jesus "
+    "reached out his hand, took hold of him, and said, 'You of "
+    "little faith, why did you doubt?' When they got into the "
+    "boat, the wind ceased. Those in the boat came and worshiped "
+    "him, saying, 'You are truly the Son of God!'"
+)
+
+
+def matthew_14_scripture():
+    """The WEBC passage text for Matthew 14:22-33 as scripture dict."""
+    return {
+        "reference": "Matthew 14:22-33",
+        "translation": "WEBC",
+        "text": MATTHEW_14_NARRATION,
+    }
+
+
+def _peters_request_segment_index(segments):
+    """Find the segment index that carries Peter's request to Jesus."""
+    for index, segment in enumerate(segments):
+        if "command me to come to you on the water" in segment:
+
+            return index
+
+    raise AssertionError(
+        "No segment contains Peter's request to come on the water."
+    )
+
+
+def test_character_positions_extracts_timeline_from_matthew_14():
+    """_character_positions extracts Jesus walking on the water from
+    the Matthew 14 passage without hardcoding the scene."""
+    from ai.content_generator import _character_positions
+
+    scripture = matthew_14_scripture()
+
+    timeline, _ = _character_positions(str(scripture["text"]))
+
+    # The passage establishes Jesus walking on the water toward the
+    # disciples - the key fact the visual verifier must check.
+    walking_on_water = any(
+        "walking on the water" in position.lower()
+        for _character, position, _sentence in timeline
+    )
+
+    assert walking_on_water, (
+        f"Expected timeline to include Jesus walking on the water, "
+        f"got: {timeline}"
+    )
+
+
+def test_positions_at_segment_includes_jesus_on_water_for_peters_request():
+    """_positions_at_segment reports Jesus on the water for the segment
+    that carries Peter's request - the moment the old pipeline placed
+    him on the distant shore instead."""
+    from ai.content_generator import _positions_at_segment
+
+    generator, _ = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _peters_request_segment_index(segments)
+
+    positions = _positions_at_segment(
+        MATTHEW_14_NARRATION,
+        index,
+        len(segments),
+    )
+
+    # At Peter's request, the passage has already established that
+    # Jesus is walking on the water toward the disciples.
+    walking_on_water = any(
+        character == "jesus"
+        and "walking on the water" in position.lower()
+        for character, position in positions
+    )
+
+    assert walking_on_water, (
+        f"Expected Jesus on the water at segment {index}, "
+        f"got: {positions}"
+    )
+
+
+def test_segment_prompt_includes_character_positions_for_matthew_14():
+    """The director prompt for Peter's request segment carries the
+    passage's character positions so Jesus is not placed on the shore."""
+    generator, _ = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _peters_request_segment_index(segments)
+
+    prompt = generator.build_segment_prompt(
+        matthew_14_scripture(),
+        segments,
+        index,
+    )
+
+    assert "CHARACTER POSITIONS FROM THE PASSAGE" in prompt
+    assert "walking on the water" in prompt.lower()
+
+
+def test_verifier_prompt_includes_character_positions_for_matthew_14():
+    """The verifier prompt for Peter's request segment carries the
+    passage's character positions so a shore placement is checkable."""
+    generator, _ = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _peters_request_segment_index(segments)
+
+    bad_query = (
+        "Style: realistic. Jesus stands on the distant shore watching "
+        "the disciples' boat in the storm, waiting for Peter to ask "
+        "him to come."
+    )
+
+    prompt = generator.build_visual_verification_prompt(
+        matthew_14_scripture(),
+        segments,
+        index,
+        bad_query,
+    )
+
+    assert "CHARACTER POSITIONS FROM THE PASSAGE" in prompt
+    assert "walking on the water" in prompt.lower()
+    assert bad_query in prompt
+
+
+def test_visual_checker_rejects_jesus_on_shore_during_water_walking():
+    """The verifier rejects a visual that places Jesus on the shore
+    during Peter's request, when the passage has him already walking
+    on the water toward the disciples."""
+    generator, stub = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _peters_request_segment_index(segments)
+
+    bad_query = (
+        "Style: realistic. Jesus stands on the distant shore watching "
+        "the disciples' boat in the storm, waiting for Peter to ask "
+        "him to come."
+    )
+
+    # The checker rejects the shore placement; generate() re-rolls
+    # with the rejection as feedback.
+    stub.verifications = [False, True]
+
+    aligned, reason = generator.verify_visual(
+        matthew_14_scripture(),
+        segments,
+        index,
+        bad_query,
+    )
+
+    assert not aligned
+    assert reason
+
+
+def test_visual_checker_accepts_jesus_on_water_during_water_walking():
+    """The verifier accepts a visual that places Jesus walking on the
+    water during Peter's request, matching the passage."""
+    generator, stub = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _peters_request_segment_index(segments)
+
+    good_query = (
+        "Style: realistic. Jesus walks on the water toward the "
+        "disciples' boat in the middle of the dark sea at the "
+        "fourth watch of the night, the wind still blowing against "
+        "the waves. Medium shot, Jesus visible on the water, the "
+        "boat nearby with the disciples aboard."
+    )
+
+    # The checker approves on the first attempt.
+    stub.verifications = [True]
+
+    aligned, reason = generator.verify_visual(
+        matthew_14_scripture(),
+        segments,
+        index,
+        good_query,
+    )
+
+    assert aligned
+    assert reason == ""
+
+
+def test_re_roll_feedback_includes_specific_location_error():
+    """When the verifier rejects a shore placement, the re-roll prompt
+    carries the checker's specific reason so the fix targets the
+    location error, not a blind resample."""
+    generator, stub = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _peters_request_segment_index(segments)
+
+    bad_query = (
+        "Style: realistic. Jesus stands on the distant shore watching "
+        "the disciples' boat in the storm."
+    )
+    good_query = (
+        "Style: realistic. Jesus walks on the water toward the "
+        "disciples' boat in the dark sea."
+    )
+
+    # Enough queries for every segment plus one re-roll, then override
+    # the two calls that belong to Peter's request segment.
+    stub.queries = [
+        f"Style: realistic. Shot {position + 1}."
+        for position in range(len(segments) + 1)
+    ]
+    stub.queries[index] = bad_query
+    stub.queries[index + 1] = good_query
+    stub.verifications = [True] * index + [False, True]
+
+    content = generator.generate(
+        matthew_14_scripture(),
+        segments,
+        narration=MATTHEW_14_NARRATION,
+    )
+
+    # The re-roll prompt carried the rejection forward.
+    re_roll_prompt = stub.visual_prompts[index + 1]
+
+    assert "YOUR PREVIOUS ANSWER WAS REJECTED" in re_roll_prompt
+
+    # The corrected query is what shipped for that sentence.
+    assert content["visuals"][index]["search_query"] == good_query
+    assert bad_query not in content["visuals"][index]["search_query"]
+
+
+def _rescue_segment_index(segments):
+    """Find the segment index that carries Jesus rescuing Peter."""
+    for index, segment in enumerate(segments):
+
+        if "reached out his hand" in segment:
+
+            return index
+
+    raise AssertionError(
+        "No segment contains Jesus reaching out to rescue Peter."
+    )
+
+
+def test_positions_at_segment_includes_jesus_rescue_for_rescue_segment():
+    """_positions_at_segment reports Jesus reaching out on the water for
+    the segment that narrates the rescue - the moment the prorated
+    timeline used to strand his position in a later segment, leaving
+    the rescue visual free to place him on the distant shore."""
+    from ai.content_generator import _positions_at_segment
+
+    generator, _ = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _rescue_segment_index(segments)
+
+    positions = _positions_at_segment(
+        MATTHEW_14_NARRATION,
+        index,
+        len(segments),
+    )
+
+    # At the rescue, the passage has Jesus reaching out to Peter on the
+    # water - the visual must not place him back on the distant shore.
+    rescuing_on_water = any(
+        character == "jesus"
+        and "reached out his hand" in position.lower()
+        for character, position in positions
+    )
+
+    assert rescuing_on_water, (
+        f"Expected Jesus rescuing on the water at segment {index}, "
+        f"got: {positions}"
+    )
+
+
+def test_segment_prompt_includes_character_positions_for_rescue_segment():
+    """The director prompt for the rescue segment carries the passage's
+    character positions so Jesus is not placed on the shore."""
+    generator, _ = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _rescue_segment_index(segments)
+
+    prompt = generator.build_segment_prompt(
+        matthew_14_scripture(),
+        segments,
+        index,
+    )
+
+    assert "CHARACTER POSITIONS FROM THE PASSAGE" in prompt
+    assert "reached out his hand" in prompt.lower()
+
+
+def test_visual_verification_prompt_includes_character_positions_for_rescue_segment():
+    """The verifier prompt for the rescue segment carries the passage's
+    character positions so a shore placement is checkable against the
+    rescue position."""
+    generator, _ = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _rescue_segment_index(segments)
+
+    shore_query = (
+        "Style: realistic. Jesus stands on the distant shore watching "
+        "Peter sink in the storm."
+    )
+
+    prompt = generator.build_visual_verification_prompt(
+        matthew_14_scripture(),
+        segments,
+        index,
+        shore_query,
+    )
+
+    assert "CHARACTER POSITIONS FROM THE PASSAGE" in prompt
+    assert "reached out his hand" in prompt.lower()
+    assert shore_query in prompt
+
+
+def test_visual_checker_rejects_jesus_on_shore_during_rescue():
+    """The verifier rejects a visual that places Jesus on the shore
+    while Peter is sinking, when the passage has him reaching out on
+    the water beside him."""
+    generator, stub = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _rescue_segment_index(segments)
+
+    bad_query = (
+        "Style: realistic. Jesus stands on the distant shore watching "
+        "Peter sink in the dark sea, waiting to pull him into the boat."
+    )
+
+    # The checker rejects the shore placement; generate() re-rolls
+    # with the rejection as feedback.
+    stub.verifications = [False, True]
+
+    aligned, reason = generator.verify_visual(
+        matthew_14_scripture(),
+        segments,
+        index,
+        bad_query,
+    )
+
+    assert not aligned
+    assert reason
+
+
+def test_visual_checker_accepts_jesus_on_water_during_rescue():
+    """The verifier accepts a visual that places Jesus on the water
+    reaching out to Peter during the rescue, matching the passage."""
+    generator, stub = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _rescue_segment_index(segments)
+
+    good_query = (
+        "Style: realistic. Jesus reaches out his hand on the water "
+        "beside Peter as Peter sinks in the dark sea at the fourth "
+        "watch of the night, the wind still blowing."
+    )
+
+    stub.verifications = [True]
+
+    aligned, reason = generator.verify_visual(
+        matthew_14_scripture(),
+        segments,
+        index,
+        good_query,
+    )
+
+    assert aligned
+    assert reason == ""
+
+
+def test_re_roll_feedback_for_rescue_segment_carries_rejection():
+    """When the verifier rejects a shore placement for the rescue, the
+    re-roll prompt carries the rejection forward so the fix targets the
+    location error, and a corrected water visual can pass."""
+    generator, stub = make_generator()
+
+    segments = generator.build_segments(
+        {"text": MATTHEW_14_NARRATION}
+    )
+
+    index = _rescue_segment_index(segments)
+
+    bad_query = (
+        "Style: realistic. Jesus stands on the distant shore watching "
+        "Peter sink in the storm, waiting to pull him into the boat."
+    )
+    good_query = (
+        "Style: realistic. Jesus reaches out his hand on the water "
+        "beside Peter as he sinks in the dark sea."
+    )
+
+    # Enough queries for every segment plus one re-roll, then override
+    # the two calls that belong to the rescue segment.
+    stub.queries = [
+        f"Style: realistic. Shot {position + 1}."
+        for position in range(len(segments) + 1)
+    ]
+    stub.queries[index] = bad_query
+    stub.queries[index + 1] = good_query
+    stub.verifications = [True] * index + [False, True]
+
+    content = generator.generate(
+        matthew_14_scripture(),
+        segments,
+        narration=MATTHEW_14_NARRATION,
+    )
+
+    # The re-roll prompt carried the rejection forward.
+    re_roll_prompt = stub.visual_prompts[index + 1]
+    first_attempt_prompt = stub.visual_prompts[index]
+
+    assert "YOUR PREVIOUS ANSWER WAS REJECTED" in re_roll_prompt
+    assert "YOUR PREVIOUS ANSWER WAS REJECTED" not in first_attempt_prompt
+
+    # The corrected query is what shipped for that sentence.
+    assert content["visuals"][index]["search_query"] == good_query
+    assert bad_query not in content["visuals"][index]["search_query"]
+
+
+# --------------------------------------------------------------------
+# Character position tracking regression: Matthew 14:22-33
+#
+# These tests lock in the fix for two defects:
+#   1. Every character mentioned in a sentence was assigned that
+#      sentence as its position, so a destination (Jesus in
+#      "Peter walked ... toward Jesus") overwrote an established
+#      position. Only the sentence's subject/agent may be assigned.
+#   2. Prepositions and particles ("up" in "Cheer up!", "of" in
+#      "watch of the night") were treated as movement verbs, so they
+#      falsely triggered movement checks or suppressed a subject's
+#      established position. They are excluded from both scans.
+#
+# They exercise _character_positions, _current_positions,
+# _positions_at_segment, the director prompt, the verifier prompt,
+# and the generate() re-roll flow with realistic Matthew 14 sentences.
+# --------------------------------------------------------------------
+
+
+def test_character_positions_assigns_position_to_subject_not_destination():
+    """'Peter stepped down ... toward Jesus' updates Peter, not Jesus.
+
+    Against the defective implementation Jesus also received Peter's
+    sentence as his position, overwriting his established position on
+    the water.
+    """
+    from ai.content_generator import _character_positions
+
+    passage = (
+        "Jesus came walking on the water toward them. "
+        "Peter stepped down from the boat and walked on the water toward Jesus."
+    )
+
+    timeline, current = _character_positions(passage)
+
+    peter_positions = [
+        position for character, position, _ in timeline if character == "peter"
+    ]
+    jesus_positions = [
+        position for character, position, _ in timeline if character == "jesus"
+    ]
+
+    assert any(
+        "stepped down from the boat" in position for position in peter_positions
+    )
+    # Jesus keeps the position the passage established for him; the
+    # sentence that names him only as a destination does not move him.
+    assert jesus_positions == ["Jesus came walking on the water toward them."]
+    assert current["jesus"] == "Jesus came walking on the water toward them."
+    assert current["peter"] == (
+        "Peter stepped down from the boat and walked on the water toward Jesus."
+    )
+
+
+def test_character_positions_ignores_false_movement_triggers():
+    """'Cheer up!' and 'the fourth watch of the night' create no positions.
+
+    Against the defective implementation 'up' and 'of' were movement
+    verbs, so 'Immediately Jesus said ... Cheer up!' overwrote Jesus's
+    water position and a subject could be suppressed by a preposition.
+    Genuine movement such as 'Jesus went up onto a mountain' still works.
+    """
+    from ai.content_generator import _character_positions
+
+    passage = (
+        "Jesus came walking on the water toward them. "
+        "Immediately Jesus spoke to them, saying, 'Cheer up! It is I! Don't be afraid.' "
+        "The fourth watch of the night."
+    )
+
+    timeline, current = _character_positions(passage)
+
+    assert not any(
+        "cheer up" in position.lower() for _, position, _ in timeline
+    )
+    assert not any(
+        "watch of the night" in position.lower() for _, position, _ in timeline
+    )
+    # Jesus's established water position survives the incidental mention.
+    assert current["jesus"] == "Jesus came walking on the water toward them."
+
+
+def test_character_positions_still_records_genuine_movement():
+    """'Jesus went up onto a mountain' establishes Jesus's movement and location."""
+    from ai.content_generator import _character_positions
+
+    passage = "Jesus went up onto a mountain by himself to pray."
+
+    timeline, current = _character_positions(passage)
+
+    assert current["jesus"] == "Jesus went up onto a mountain by himself to pray."
+    assert any(
+        "went up onto a mountain" in position for _, position, _ in timeline
+    )
+
+
+def test_character_positions_establishes_position_despite_of_before_name():
+    """'In the fourth watch of the night, Jesus came walking on the water.'
+
+    Against the defective implementation 'of' was a movement verb
+    appearing before 'Jesus', so the subject was judged not to be the
+    agent and his position was suppressed.
+    """
+    from ai.content_generator import _character_positions
+
+    passage = "In the fourth watch of the night, Jesus came walking on the water toward them."
+
+    timeline, current = _character_positions(passage)
+
+    assert current["jesus"] == passage.strip()
+    assert any(
+        "walking on the water" in position for _, position, _ in timeline
+    )
+
+
+def test_character_positions_tracks_location_change_and_ignores_mere_mentions():
+    """A character's position changes when he moves; a later sentence
+    that merely mentions him without movement or place does not add an
+    entry or overwrite the last valid location."""
+    from ai.content_generator import _character_positions
+
+    passage = (
+        "Jesus went up onto a mountain by himself to pray. "
+        "In the fourth watch of the night, Jesus came walking on the water toward them. "
+        "Peter cried out, Lord save me."
+    )
+
+    timeline, current = _character_positions(passage)
+
+    jesus_positions = [
+        position for character, position, _ in timeline if character == "jesus"
+    ]
+    assert jesus_positions == [
+        "Jesus went up onto a mountain by himself to pray.",
+        "In the fourth watch of the night, Jesus came walking on the water toward them.",
+    ]
+    assert current["jesus"] == (
+        "In the fourth watch of the night, Jesus came walking on the water toward them."
+    )
+    # 'Peter cried out, Lord save me' has no movement verb or place word,
+    # so Peter's mere mention creates no entry and overwrites nothing.
+    assert all(character != "peter" for character, _, _ in timeline)
+
+
+def test_current_positions_returns_latest_valid_location_without_duplicates():
+    """_current_positions keeps the last position per character, with no
+    stale entries or duplicate characters."""
+    from ai.content_generator import _current_positions
+
+    positions = [
+        ("jesus", "Jesus went up onto a mountain by himself to pray."),
+        (
+            "peter",
+            "Peter stepped down from the boat and walked on the water toward Jesus.",
+        ),
+        (
+            "jesus",
+            "In the fourth watch of the night, Jesus came walking on the water toward them.",
+        ),
+        (
+            "jesus",
+            "Immediately Jesus reached out his hand and took hold of him.",
+        ),
+    ]
+
+    current = _current_positions(positions)
+    current_dict = dict(current)
+
+    # No duplicate characters.
+    assert len(current) == len(set(character for character, _ in current))
+    assert len(current) == 2
+    # The latest valid location wins for each character.
+    assert current_dict["jesus"] == "Immediately Jesus reached out his hand and took hold of him."
+    assert current_dict["peter"] == (
+        "Peter stepped down from the boat and walked on the water toward Jesus."
+    )
+
+
+def test_matthew_14_rescue_segment_prompts_carry_correct_positions():
+    """Director and verifier prompts for the rescue segment report Jesus
+    reaching out on the water, not on the distant shore."""
+    generator, _ = make_generator()
+
+    segments = generator.build_segments({"text": MATTHEW_14_NARRATION})
+    index = _rescue_segment_index(segments)
+
+    director_prompt = generator.build_segment_prompt(
+        matthew_14_scripture(), segments, index
+    )
+    assert "CHARACTER POSITIONS FROM THE PASSAGE" in director_prompt
+    assert "reached out his hand" in director_prompt.lower()
+
+    shore_query = (
+        "Style: realistic. Jesus stands on the distant shore watching "
+        "Peter sink in the dark sea, waiting to pull him into the boat."
+    )
+    verifier_prompt = generator.build_visual_verification_prompt(
+        matthew_14_scripture(), segments, index, shore_query
+    )
+    assert "CHARACTER POSITIONS FROM THE PASSAGE" in verifier_prompt
+    assert "reached out his hand" in verifier_prompt.lower()
+    assert shore_query in verifier_prompt
+
+
+def test_matthew_14_rescue_rejects_shore_placement_and_re_rolls_with_reason():
+    """A rescue visual placing Jesus on the distant shore is rejected,
+    the specific rejection reason is passed into the re-roll prompt, and
+    a corrected water visual is accepted and shipped."""
+    generator, stub = make_generator()
+
+    segments = generator.build_segments({"text": MATTHEW_14_NARRATION})
+    index = _rescue_segment_index(segments)
+
+    shore_query = (
+        "Style: realistic. Jesus stands on the distant shore watching "
+        "Peter sink in the dark sea, waiting to pull him into the boat."
+    )
+    good_query = (
+        "Style: realistic. Jesus reaches out his hand on the water "
+        "beside Peter as Peter sinks in the dark sea at the fourth "
+        "watch of the night, the wind still blowing."
+    )
+
+    stub.verifications = [False, True]
+    aligned, reason = generator.verify_visual(
+        matthew_14_scripture(), segments, index, shore_query
+    )
+
+    assert not aligned
+    assert reason == "The query shows the wrong beat."
+
+    # Re-roll: every segment gets a query, then override the rescue
+    # segment's first attempt and its re-roll.
+    stub.queries = [
+        f"Style: realistic. Shot {position + 1}."
+        for position in range(len(segments) + 1)
+    ]
+    stub.queries[index] = shore_query
+    stub.queries[index + 1] = good_query
+    stub.verifications = [True] * index + [False, True]
+
+    content = generator.generate(
+        matthew_14_scripture(), segments, narration=MATTHEW_14_NARRATION
+    )
+
+    first_attempt_prompt = stub.visual_prompts[index]
+    re_roll_prompt = stub.visual_prompts[index + 1]
+
+    assert "YOUR PREVIOUS ANSWER WAS REJECTED" not in first_attempt_prompt
+    assert "YOUR PREVIOUS ANSWER WAS REJECTED" in re_roll_prompt
+    # The specific rejection reason is carried into the re-roll.
+    assert reason in re_roll_prompt
+
+    # The corrected water visual is what shipped.
+    assert content["visuals"][index]["search_query"] == good_query
+    assert shore_query not in content["visuals"][index]["search_query"]
+
+
+
 def test_one_visual_per_duration_group():
     """
     Exactly one visual prompt is generated per narration group: the

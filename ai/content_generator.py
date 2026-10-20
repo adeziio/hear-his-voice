@@ -293,6 +293,247 @@ def _normalize_words(text):
     )
 
 
+# Named people the passage may establish and place in a scene.
+# Kept short and general: any capitalised word of three or more letters
+# that is not an ordinary sentence-starter can be a person, place, or
+# title. The caller narrows this to the people that actually appear.
+_CHARACTER_WORDS = frozenset(
+    """
+    jesus peter john james andrew philip bartholomew thomas matthew
+    james jude simon judas lazarus mary martha zacchaeus nicodemus
+    pilate herod caesar cleopas disciples crowd Pharisees sadducees
+    scribes elders chief priests prophets apostles witnesses angels
+    """.split()
+)
+
+# Verbs that move a person from one place or state to another.
+_MOVEMENT_VERBS = frozenset(
+    """
+    went came went up came down came walking walked stepped climbed
+    got entered left departed stood standing kneeling lying lying down
+    sleeping asleep praying sitting sitting down arrived approached
+    drew near reached out took hold touched went ahead remained stayed
+    alone apart together into out of onto off toward against
+    """.split()
+)
+
+# Place words that anchor a person to a location.
+_PLACE_WORDS = frozenset(
+    """
+    shore mountain boat sea water tomb house city road way street
+    wilderness garden synagogue temple wilderness desert hill hillside
+    valley plain field shore bank deep middle stern bow deck
+    """.split()
+)
+
+# Words from _MOVEMENT_VERBS that are prepositions or particles rather
+# than verbs of motion. They are excluded from the agent-detection scan
+# in _character_positions() so a preposition like "of" in "watch of the
+# night" doesn't falsely appear before the subject and suppress that
+# character's established position.
+_POSITION_PREPOSITIONS = frozenset(
+    """
+    up down out of into onto off toward against near ahead alone apart together
+    """.split()
+)
+
+
+def _character_positions(passage_text):
+    """
+    Extract where named characters are located from the passage text.
+
+    Scans the passage sentence by sentence for statements that place a
+    named character at a location or in a state, and returns a timeline
+    of ``(character, position, sentence)`` entries in passage order.
+    The heuristic looks for a named person word together with a movement
+    or location verb and a place word in the same sentence, catching
+    statements like ``"Jesus came walking on the water toward them"``
+    without hardcoding any scene.
+
+    Returns a tuple ``(timeline, current)`` where ``timeline`` is a list
+    of ``(character, position, sentence)`` and ``current`` is a dict
+    mapping each character to their last known position description.
+    """
+    value = str(passage_text or "")
+
+    # Split into sentences using the same splitter the segmenter uses,
+    # so positions line up with the passage's own sentence boundaries.
+    from scripture.segmenter import split_sentences, _protected_spans
+
+    sentences = split_sentences(value, _protected_spans(value))
+
+    timeline = []
+    current = {}
+
+    for sentence in sentences:
+        words = _normalize_words(sentence)
+
+        # Find the named people this sentence mentions.
+        mentioned = [
+            word
+            for word in _CHARACTER_WORDS
+            if word in words
+        ]
+
+        if not mentioned:
+
+            continue
+
+        # Only count genuine motion verbs, not prepositions/particles
+        # (e.g. "up" in "Cheer up!" or "of" in "watch of the night").
+        has_movement = any(
+            verb in words
+            for verb in _MOVEMENT_VERBS
+            if verb not in _POSITION_PREPOSITIONS
+        )
+
+        has_place = any(
+            place in words
+            for place in _PLACE_WORDS
+        )
+
+        if not (has_movement or has_place):
+
+            continue
+
+        position = sentence.strip()
+
+        # Only assign the position to characters who are the agent or
+        # subject of the movement/location action. A character whose name
+        # appears before a movement verb in the sentence is likely
+        # performing the action; a character whose name appears only after
+        # the movement verb is likely a destination, observer, or dialogue
+        # participant whose location this sentence does not establish.
+        # This keeps a stale or incidental mention from overwriting a
+        # character's last explicitly established position.
+        #
+        # Preposition/particle words (e.g. "of" in "watch of the night",
+        # "toward" in "walked toward Jesus") are excluded from the agent
+        # scan so they don't falsely appear before the subject.
+        movement_indices = [
+            words.index(verb)
+            for verb in _MOVEMENT_VERBS
+            if verb in words
+            and verb not in _POSITION_PREPOSITIONS
+        ]
+        first_movement = min(movement_indices) if movement_indices else None
+
+        for person in mentioned:
+
+            try:
+
+                person_index = words.index(person)
+
+            except ValueError:
+
+                continue
+
+            if first_movement is None or person_index < first_movement:
+
+                current[person] = position
+
+                timeline.append(
+                    (person, position, sentence.strip())
+                )
+
+    return timeline, current
+
+
+def _current_positions(positions):
+    """
+    Returns only the last (current) position for each character.
+
+    ``positions`` may hold several timeline entries for the same
+    character (one per passage sentence that mentioned them).
+    Keeping only the last entry per character makes the position block
+    unambiguous: the director and the checker see where each person is
+    at this point in the story, not a history of everywhere they have
+    been. For example, for the Peter-sinking segment of Matthew 14,
+    Jesus's last entry is "Peter walked on the waters to come to
+    Jesus" (Jesus on the water) rather than competing with an earlier
+    "Jesus at the boat" entry that could let a shore placement slip
+    past the verifier.
+    """
+    current = {}
+
+    for character, position in positions:
+
+        current[character] = position
+
+    return list(current.items())
+
+
+def _positions_at_segment(
+    passage_text,
+    segment_index,
+    total_segments
+):
+    """
+    Returns the character positions established by the passage up to
+    the point this narration segment falls in the story.
+
+    Segments are chronological word chunks of the narration, which
+    retells the passage in order. The passage's position timeline is
+    prorated across the segments so each segment sees the positions
+    the passage has established at roughly that point in the story.
+
+    Returns a list of ``(character, position)`` pairs, or an empty
+    list when the passage establishes no positions.
+    """
+    timeline, _ = _character_positions(passage_text)
+
+    if not timeline:
+
+        return []
+
+    # Split the passage into sentences so each timeline entry can be
+    # located by the passage sentence that established it. The cutoff is
+    # expressed in passage sentences, not timeline-entry index.
+    #
+    # Timeline-entry index does not track story chronology: not every
+    # passage sentence establishes a position, so a position established
+    # late in the passage can sit late in the timeline while its sentence
+    # actually falls inside an earlier word-count segment (the rescue in
+    # Matthew 14:22-33 is one such case - its timeline entry would be
+    # prorated to a later segment than the one that narrates it). Basing
+    # the cutoff on the establishing sentence keeps positions consistent
+    # across consecutive narration chunks: every segment sees every
+    # position the passage has established up to the point that segment
+    # covers, and no position is stranded in a segment after the moment
+    # it depicts.
+    from scripture.segmenter import split_sentences, _protected_spans
+
+    sentences = split_sentences(passage_text, _protected_spans(passage_text))
+    sentence_index = {
+        sentence.strip(): index
+        for index, sentence in enumerate(sentences)
+    }
+    total_sentences = len(sentences)
+
+    # The end of the passage fraction this segment covers.
+    passage_cutoff = (
+        (segment_index + 1) * total_sentences
+    ) // max(total_segments, 1)
+
+    relevant = [
+        (character, position)
+        for character, position, sentence in timeline
+        if sentence_index.get(sentence.strip(), 0) <= passage_cutoff
+    ]
+
+    # Keep every timeline entry: each one records when a named
+    # character's position changed in the passage. Dropping later
+    # entries for the same character would lose position changes -
+    # for example, Jesus going from "sent the disciples ahead" to
+    # "walking on the water toward them."
+    positions = [
+        (character, position)
+        for character, position in relevant
+    ]
+
+    return positions
+
+
 def _name_key(word):
     """
     The comparable form of a name: lower-cased, with any possessive or
@@ -921,6 +1162,46 @@ class ContentGenerator(
             for position, text in enumerate(segments)
         )
 
+        # Where the passage has each named character at this point in
+        # the story. The director must not place a character where the
+        # passage contradicts - for example, Jesus on the shore when the
+        # passage has him already walking on the water toward the
+        # disciples. Computed before the prompt assembly so it can be
+        # woven into the single parenthesised expression.
+        positions = _positions_at_segment(
+            str(scripture.get("text") or ""),
+            index,
+            len(segments),
+        )
+
+        if positions:
+
+            # Keep only the last position per character so the position
+            # block is unambiguous: each named person appears once with
+            # their current location, not a history of everywhere they
+            # have been. This stops a stale entry (e.g. "Jesus at the
+            # boat") from competing with the current one ("Jesus walking
+            # on the water") and letting a contradictory placement slip
+            # past the director and the verifier.
+            current_positions = _current_positions(positions)
+
+            position_lines = "\n".join(
+                f"  - {character}: {position}"
+                for character, position in current_positions
+            )
+
+            position_block = (
+                "CHARACTER POSITIONS FROM THE PASSAGE\n"
+                "The passage places people as follows at this point "
+                "in the story. Never place a character anywhere else:\n"
+                + position_lines
+                + "\n\n"
+            )
+
+        else:
+
+            position_block = ""
+
         prompt = (
             "You are the visual director for \""
             + name
@@ -964,8 +1245,8 @@ class ContentGenerator(
             f"SEGMENT {index + 1}: {segment}\n"
             f"  JUST BEFORE: {before}\n"
             f"  JUST AFTER: {after}\n\n"
-
-            "VISUAL PROMPT RULES\n"
+            + position_block
+            + "VISUAL PROMPT RULES\n"
             "Return one visual object for this ONE sentence. Its "
             "search_query is a single, complete SnapGenAI visual prompt "
             "for this sentence's clip. It must depict the one clear "
@@ -1131,6 +1412,47 @@ class ContentGenerator(
             for position, text in enumerate(segments)
         )
 
+        # Where the passage has each named character at this point in
+        # the story. The checker uses this to reject a visual that
+        # places a character where the passage doesn't have them.
+        # Computed before the return so it can be woven into the single
+        # parenthesised expression.
+        positions = _positions_at_segment(
+            str(scripture.get("text") or ""),
+            index,
+            len(segments),
+        )
+
+        if positions:
+
+            # Keep only the last position per character so the position
+            # block is unambiguous: each named person appears once with
+            # their current location, not a history of everywhere they
+            # have been. This stops a stale entry (e.g. "Jesus at the
+            # boat") from competing with the current one ("Jesus walking
+            # on the water") and letting a contradictory placement slip
+            # past the verifier.
+            current_positions = _current_positions(positions)
+
+            position_lines = "\n".join(
+                f"  - {character}: {position}"
+                for character, position in current_positions
+            )
+
+            position_block = (
+                "CHARACTER POSITIONS FROM THE PASSAGE\n"
+                "The passage places people as follows at this point "
+                "in the story. A visual that places any character "
+                "elsewhere is a location failure, even if the scene "
+                "otherwise fits the sentence:\n"
+                + position_lines
+                + "\n\n"
+            )
+
+        else:
+
+            position_block = ""
+
         return (
             "You are the accuracy checker for \""
             + name
@@ -1157,7 +1479,8 @@ class ContentGenerator(
             f"THIS SENTENCE: {segment}\n"
             f"  JUST BEFORE: {before}\n"
             f"  JUST AFTER: {after}\n\n"
-            "THE VISUAL PROMPT IN QUESTION\n"
+            + position_block
+            + "THE VISUAL PROMPT IN QUESTION\n"
             + str(query or "")
             + "\n\n"
             "JUDGE IT ON THESE POINTS ONLY\n"
@@ -1183,7 +1506,13 @@ class ContentGenerator(
             "already has them in, the ones who enter are the people "
             "the story has outside it at this point - never the same "
             "people shown climbing in, and never from a shore the "
-            "narration never mentions.\n"
+            "narration never mentions. Check every named character "
+            "against the CHARACTER POSITIONS FROM THE PASSAGE section "
+            "above: if the passage places a character at a location at "
+            "this point, the visual must show them there. Placing a "
+            "named character where the passage does not have them at "
+            "this point is a location failure, even if the scene "
+            "otherwise fits the sentence.\n"
             "- Conditions: does it contradict a condition still in "
             "effect - storm, night, rain, crowd, being apart? A "
             "contradiction is a failure.\n"
