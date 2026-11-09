@@ -43,13 +43,7 @@
                 "failure_selector": "",
                 "login_email_selector": "",
                 "login_password_selector": "",
-                "login_submit_selector": "",
-                "watermark_remover": {
-                    "executable": "tools/GeminiWatermarkTool-Video.exe",
-                    "output_flag": "",
-                    "extra_args": [],
-                    "timeout_seconds": 3600
-                }
+                "login_submit_selector": ""
             }
         }
     }

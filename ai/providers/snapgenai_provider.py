@@ -23,13 +23,9 @@ from selenium.webdriver.common.by import (
 from selenium.webdriver.common.keys import (
     Keys
 )
-
-from ai.providers.veo_watermark_remover import (
-    VeoWatermarkError,
-    VeoWatermarkRemover,
+from ai.providers.video_validator import (
     validate_video_file
 )
-
 
 class SnapGenAiError(
     RuntimeError
@@ -159,9 +155,8 @@ class SnapGenAiProvider:
     credentials from the environment -> resubmit the prompt when
     authentication dropped the original submission -> wait for the
     generation to finish using element state (no fixed sleeps) ->
-    download the video through the browser's download manager ->
-    remove the Veo watermark with VeoWatermarkRemover (standard CPU
-    mode) and validate the cleaned result.
+    download the video through the browser's download manager and
+    keep the original clip as-is.
 
     When attaching to the dedicated Chrome launched by
     run_windows.bat, that browser window is automatically brought to
@@ -229,10 +224,6 @@ class SnapGenAiProvider:
             progress_callback
         )
 
-        self.watermark_remover = VeoWatermarkRemover(
-            config,
-            notify=self._notify
-        )
 
     def _notify(
         self,
@@ -2414,10 +2405,7 @@ class SnapGenAiProvider:
 
         """
         Full SnapGenAI workflow for one clip: browser generation ->
-        download -> Veo watermark removal (standard CPU mode) ->
-        validated cleaned video at output_path. The downloaded
-        original is kept until the cleaned output has been
-        successfully created.
+        download -> keep the original clip as-is at output_path.
         """
 
         prompt = str(
@@ -2576,84 +2564,45 @@ class SnapGenAiProvider:
                 f"in the episode folder: {error}"
             )
 
-        # The remover keeps the original intact and the cleaned
-        # output is validated before this call returns, so the
-        # original download is only discarded after a verified
-        # success.
-
-        # Watermark removal is best-effort: the tool can fail on some
-        # GPUs/drivers (e.g. exit code 2 with Intel Arc DirectML probe
-        # output). On any failure keep the original downloaded video
-        # instead of failing the whole generation.
+        # Keep the original downloaded clip as-is: copy it to the
+        # final output path so nothing is modified or removed.
 
         try:
 
-            cleaned_path = (
-                self.watermark_remover
-                .remove_watermark(
-                    staging_path,
-                    output_path
-                )
+            if output_path.exists():
+
+                output_path.unlink()
+
+        except OSError as remove_error:
+
+            raise SnapGenAiError(
+                f"Could not replace {output_path.name}: "
+                f"{remove_error}"
             )
 
-        except VeoWatermarkError as error:
+        try:
 
-            self._notify(
-                "Veo watermark removal failed; keeping the "
-                f"original download: {error}"
-            )
-
-            try:
-
-                validate_video_file(
+            shutil.copy2(
+                str(
                     staging_path
-                )
-
-            except VeoWatermarkError:
-
-                raise SnapGenAiError(
-                    "SnapGenAI generation failed: the downloaded "
-                    "video is invalid and watermark removal also "
-                    f"failed: {error}"
-                )
-
-            try:
-
-                if output_path.exists():
-
-                    output_path.unlink()
-
-            except OSError as remove_error:
-
-                raise SnapGenAiError(
-                    f"Could not replace {output_path.name}: "
-                    f"{remove_error}"
-                )
-
-            try:
-
-                shutil.copy2(
-                    str(
-                        staging_path
-                    ),
-                    str(
-                        output_path
-                    )
-                )
-
-            except OSError as copy_error:
-
-                raise SnapGenAiError(
-                    "Veo watermark removal failed and the original "
-                    "download could not be kept "
-                    f"({copy_error}); first error: {error}"
-                )
-
-            cleaned_path = (
+                ),
                 str(
                     output_path
                 )
             )
+
+        except OSError as copy_error:
+
+            raise SnapGenAiError(
+                f"Could not copy the downloaded clip to "
+                f"{output_path.name}: {copy_error}"
+            )
+
+        cleaned_path = (
+            str(
+                output_path
+            )
+        )
 
         try:
 
