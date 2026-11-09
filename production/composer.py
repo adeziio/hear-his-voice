@@ -44,9 +44,8 @@ FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/Arial.ttf"
 ]
 
-# Below this per-clip share (seconds), a sentence is not split across
-# multiple clips - a single clip is clearer than sub-second cuts.
-MIN_CLIP_SHARE = 1.0
+# Footage groups are consumed clip-by-clip at their natural duration;
+# no clip is ever looped to fill time.
 
 
 class Composer:
@@ -122,8 +121,9 @@ class Composer:
         cues           : caption cues from production.captions
         footage_groups: list of lists of downloaded footage paths, where
                         footage_groups[N] holds the clips for visual N
-                        (one group per narration sentence). Each group is
-                        cycled through to cover that sentence's duration.
+                        (one group per narration sentence). Clips are used
+                        at their natural duration, one after another, and
+                        never looped.
         visuals        : the visuals list from the content (for segment count
                         when footage_groups has empty groups).
         segment_count  : how many visual segments the timeline should be split
@@ -385,8 +385,10 @@ class Composer:
             segment_starts = None
 
         # Track per-group clip consumption so each query's clips are
-        # cycled independently instead of one global index across all
-        # groups.
+        # consumed in order, independently instead of one global index
+        # across all groups. Clips are used at their natural duration;
+        # when a group is exhausted, the segment ends early rather than
+        # repeating any clip.
         group_counters = [0] * num_groups
 
         frame_clips = []
@@ -416,87 +418,70 @@ class Composer:
             if not pool:
                 pool = fallback_pool
 
-            # Use every downloaded clip from this query's group: the
-            # segment is divided equally across the group's clips so
-            # both clips per query contribute to the sentence (each
-            # clip is at least 5s, so two clips comfortably cover any
-            # sentence). Very short segments keep a single clip to
-            # avoid sub-second cuts.
-            usable_count = len(pool)
-            if needed / usable_count < MIN_CLIP_SHARE:
-                usable_count = 1
+            # Use one clip from this query's pool, slowed down (or
+            # sped up) so it exactly fills the segment duration.
+            # No looping, no black frames, no gaps.
+            clip_index = group_counters[group_idx]
+            if clip_index >= len(pool):
 
-            share = needed / usable_count
+                break  # pool exhausted, cannot fill this segment
 
-            for _ in range(usable_count):
+            group_counters[group_idx] += 1
 
-                clip_index = (
-                    group_counters[group_idx]
-                    % len(pool)
+            source_path = pool[clip_index]
+
+            clip = VideoFileClip(
+                str(
+                    source_path
                 )
-                group_counters[group_idx] += 1
+            )
 
-                source_path = pool[clip_index]
+            self._opened_sources.append(
+                clip
+            )
 
-                clip = VideoFileClip(
-                    str(
-                        source_path
+            try:
+
+                # Time-stretch so the clip exactly covers `needed`
+                # seconds. factor < 1 slows down, factor > 1 speeds up.
+                clip = clip.with_effects(
+                    [
+                        vfx.MultiplySpeed(
+                            final_duration=needed
+                        )
+                    ]
+                )
+
+                clip = (
+                    self._fit_to_frame(
+                        clip,
+                        width,
+                        height
                     )
                 )
 
-                self._opened_sources.append(
+                clip = (
+                    clip.without_audio()
+                    .with_start(
+                        start
+                    )
+                    .with_duration(
+                        needed
+                    )
+                )
+
+                frame_clips.append(
                     clip
                 )
 
-                try:
+            except Exception:
+                self._close(
+                    clip
+                )
 
-                    if clip.duration > share + 0.05:
+                raise
 
-                        clip = clip.subclipped(
-                            0,
-                            share
-                        )
-
-                    elif clip.duration < share - 0.05:
-
-                        clip = clip.with_effects(
-                            [
-                                vfx.Loop(
-                                    duration=share
-                                )
-                            ]
-                        )
-
-                    clip = (
-                        self._fit_to_frame(
-                            clip,
-                            width,
-                            height
-                        )
-                    )
-
-                    clip = (
-                        clip.without_audio()
-                        .with_start(
-                            start
-                        )
-                        .with_duration(
-                            share
-                        )
-                    )
-
-                    frame_clips.append(
-                        clip
-                    )
-
-                except Exception:
-                    self._close(
-                        clip
-                    )
-
-                    raise
-
-                start += share
+            start += needed
 
         if not frame_clips:
 
