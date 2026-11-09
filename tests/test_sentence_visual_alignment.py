@@ -446,17 +446,17 @@ def test_the_segment_budget_comes_from_duration_target():
 
 def test_a_missing_or_unparseable_duration_target_falls_back():
 
-    assert _duration_target_seconds(make_config(duration_target="")) == 8.0
+    assert _duration_target_seconds(make_config(duration_target="")) == 10.0
     assert _duration_target_seconds(
         make_config(duration_target="long")
-    ) == 8.0
+    ) == 10.0
 
     assert _duration_target_seconds(
         make_config(duration_target="-4s")
-    ) == 8.0
+    ) == 10.0
 
     # No snapgenai settings at all.
-    assert _duration_target_seconds({}) == 8.0
+    assert _duration_target_seconds({}) == 10.0
 
     # A bare number and a decimal are both accepted.
     assert _duration_target_seconds(

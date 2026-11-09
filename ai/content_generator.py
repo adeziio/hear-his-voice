@@ -16,7 +16,7 @@ from scripture.segmenter import (
 # timing is derived from the narration that was actually generated.
 #
 # Each SnapGenAI clip carries one visual segment, and its length is the
-# `duration_target` in config/ai_models.json (for example "8s"). The
+# `duration_target` in config/ai_models.json (for example "10s"). The
 # spoken-length ceiling used when cutting the narration is read from that
 # setting by _duration_target_seconds() rather than hardcoded: the narration
 # is cut into consecutive word chunks of up to duration_target x
@@ -26,7 +26,7 @@ from scripture.segmenter import (
 # final chunk is fine - the duration is a maximum, never a duration to
 # fill. The default below is only the fallback used when that setting is
 # missing or cannot be parsed.
-DEFAULT_SECONDS_PER_VISUAL = 8
+DEFAULT_SECONDS_PER_VISUAL = 10
 DEFAULT_WORDS_PER_SECOND = 2.9
 
 
