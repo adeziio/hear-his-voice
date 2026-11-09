@@ -1632,15 +1632,15 @@ class SnapGenAiProvider:
     ):
 
         # The generation page lets you pick the output aspect
-        # ratio with a single button click. This is a normal UI
-        # interaction, not any bypass technique.
-
+        # ratio with a single button click. Portrait (9:16) is the
+        # target orientation. Selecting it explicitly guards
+        # against future website changes that switch the default.
         target = str(
             self._setting(
                 "aspect_ratio_target",
-                "9:16"
+                "Portrait (9:16)"
             )
-        ).strip() or "9:16"
+        ).strip() or "Portrait (9:16)"
 
         self._select_page_option(
             driver,
@@ -1648,66 +1648,6 @@ class SnapGenAiProvider:
             target,
             "aspect_ratio_button_selector",
             "aspect_ratio_timeout_seconds",
-            15
-        )
-
-    def _select_duration(
-        self,
-        driver
-    ):
-
-        target = str(
-            self._setting(
-                "duration_target",
-                ""
-            )
-        ).strip()
-
-        if not target:
-
-            self._notify(
-                "No duration_target configured - "
-                "skipping duration selection."
-            )
-
-            return
-
-        self._select_page_option(
-            driver,
-            "duration",
-            target,
-            "duration_button_selector",
-            "duration_timeout_seconds",
-            15
-        )
-
-    def _select_resolution(
-        self,
-        driver
-    ):
-
-        target = str(
-            self._setting(
-                "resolution_target",
-                ""
-            )
-        ).strip()
-
-        if not target:
-
-            self._notify(
-                "No resolution_target configured - "
-                "skipping resolution selection."
-            )
-
-            return
-
-        self._select_page_option(
-            driver,
-            "resolution",
-            target,
-            "resolution_button_selector",
-            "resolution_timeout_seconds",
             15
         )
 
@@ -2524,18 +2464,6 @@ class SnapGenAiProvider:
             self._human_pause()
 
             self._select_aspect_ratio(
-                driver
-            )
-
-            self._human_pause()
-
-            self._select_duration(
-                driver
-            )
-
-            self._human_pause()
-
-            self._select_resolution(
                 driver
             )
 
