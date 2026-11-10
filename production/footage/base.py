@@ -97,14 +97,15 @@ class VideoProvider:
 
     @staticmethod
     def slugify(
-        query
+        query,
+        index=None
     ):
 
         slug = "".join(
             character
             if character.isalnum()
             else "-"
-            for character in query.lower()
+            for character in str(query).lower()
         )
 
         slug = "-".join(
@@ -113,10 +114,17 @@ class VideoProvider:
             if part
         )
 
-        return (
-            slug[:60]
-            or "query"
-        )
+        # Use the full search query as the folder name, capped at
+        # 60 characters (the project's standard folder-name length).
+        folder = (slug[:60] or "query")
+
+        # Numeric prefix is the standard: prefix each visual/list
+        # element's folder with its sequence number (e.g.
+        # "1-style-realistic-...") for easy searching and ordering.
+        if index is not None:
+            folder = f"{index}-{folder}"
+
+        return folder
 
     @staticmethod
     def is_video_file(
