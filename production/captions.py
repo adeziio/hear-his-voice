@@ -31,11 +31,12 @@ def build_caption_cues(
         })
 
         source_index = word.get("_source_index")
-        ends_sentence = (
-            source_index in sentence_end_indices
-            if sentence_end_indices is not None
-            else _ends_sentence(text)
-        )
+        if sentence_end_indices is not None:
+            ends_sentence = (
+                source_index in sentence_end_indices or _ends_sentence(text)
+            )
+        else:
+            ends_sentence = _ends_sentence(text)
 
         if ends_sentence:
             cues.append(_make_cue(current_words))
