@@ -549,18 +549,26 @@ class FreeSafeMusicProvider(MusicProvider):
         """
         Builds the genre pages to fetch for this episode.
 
-        No history is tracked on purpose: the same genre may come
-        up back to back. Variety comes from shuffling a wide pool
-        (mood genres + energy-tier genres + topic genres +
-        configured fallback genres) and drawing max_genre_pages at
-        random, so different episodes hit different pages while the
-        energy tier keeps every draw appropriate for the video.
+        The passage's mood genre leads the list so the music stays
+        appropriate for the story; the supporting genres are shuffled
+        on every fetch so the candidate pool rotates from episode to
+        episode while the passage topic still leads the pick.
+        Everything is filtered through the devotional genre whitelist,
+        so the shuffle never pulls in an upbeat, commercial, or
+        aggressive style.
         """
 
-        # Hear His Voice is intentionally devotional. The passage may choose
-        # either a soft devotional bed or a restrained suspense palette, but
-        # never a commercial, upbeat, or aggressive style.
-        pool = []
+        slugs = []
+
+        # Mood genres first, in order, then supporting energy-pool
+        # genres, topic genres, and configured fallbacks.
+        for mood in mood_tags:
+
+            for genre in MOOD_GENRE_MAP.get(mood, []):
+
+                if genre not in slugs and genre in DEVOTIONAL_GENRES:
+
+                    slugs.append(genre)
 
         energy_pool = [
             genre
@@ -571,128 +579,40 @@ class FreeSafeMusicProvider(MusicProvider):
             if genre in DEVOTIONAL_GENRES
         ]
 
-        topic_genres = list(
-            self._topic_genres(
-                content
-            )
-        )
-
-        allowed = set(
-            energy_pool
-        )
-
-        for mood in mood_tags:
-            for genre in MOOD_GENRE_MAP.get(mood, []):
-                if genre in DEVOTIONAL_GENRES:
-                    allowed.add(genre)
-
-        for genre in topic_genres:
-
-            if genre in DEVOTIONAL_GENRES:
-                allowed.add(genre)
-
-        for genre in self.genres:
-
-            allowed.add(
-                genre
-            )
-
-        mood_first = []
-
-        for mood in mood_tags:
-
-            for genre in MOOD_GENRE_MAP.get(
-                mood,
-                []
-            ):
-
-                if (
-                    genre in energy_pool
-                    and genre not in mood_first
-                ):
-
-                    mood_first.append(
-                        genre
-                    )
-
-        leftover_mood = []
-
-        for mood in mood_tags:
-
-            for genre in MOOD_GENRE_MAP.get(
-                mood,
-                []
-            ):
-
-                if (
-                    genre not in energy_pool
-                    and genre not in leftover_mood
-                ):
-
-                    leftover_mood.append(
-                        genre
-                    )
-
-        random.shuffle(
-            leftover_mood
-        )
-
-        random.shuffle(
-            mood_first
-        )
-
-        pool = list(
-            mood_first
-        )
-
-        random.shuffle(
-            energy_pool
-        )
-
         for genre in energy_pool:
 
-            if genre in DEVOTIONAL_GENRES and genre not in pool:
+            if genre not in slugs:
 
-                pool.append(
-                    genre
-                )
+                slugs.append(genre)
 
-        random.shuffle(
-            topic_genres
-        )
+        topic_genres = list(self._topic_genres(content))
 
         for genre in topic_genres:
 
-            if (
-                genre not in pool
-                and genre in allowed
-            ):
+            if genre not in slugs and genre in DEVOTIONAL_GENRES:
 
-                if genre in DEVOTIONAL_GENRES and genre not in pool:
-
-                    pool.append(
-                        genre
-                    )
+                slugs.append(genre)
 
         for genre in self.genres:
 
-            if genre in DEVOTIONAL_GENRES and genre not in pool:
+            if genre not in slugs and genre in DEVOTIONAL_GENRES:
 
-                pool.append(
-                    genre
-                )
+                slugs.append(genre)
 
-        for genre in leftover_mood:
+        if not slugs:
 
-            if genre in DEVOTIONAL_GENRES and genre not in pool:
+            return []
 
-                pool.append(
-                    genre
-                )
+        # Keep the primary mood genre first so the passage topic still
+        # drives the pick; only the supporting genres rotate, which
+        # varies the candidate pool from episode to episode.
+        if len(slugs) > 2:
 
-        return pool[
-            :self.max_genre_pages
-        ]
+            tail = slugs[1:]
+            random.shuffle(tail)
+            slugs = slugs[:1] + tail
+
+        return slugs[:self.max_genre_pages]
 
     def _detect_energy(
         self,
@@ -1034,14 +954,12 @@ class FreeSafeMusicProvider(MusicProvider):
     ):
 
         """
-        Picks the episode's track by total random draw.
-
-        Every track fetched from the energy-compatible genre pages
+        Picks one track uniformly at random from the candidates.
+        Every track fetched from the passage-compatible genre pages
         is already an appropriate match, so the final choice is a
-        uniform random pick across all of them - no best-match
-        narrowing, no history. Back-to-back repeats are allowed;
-        variety comes from the wide genre pool, not from avoiding
-        recent picks.
+        uniform random draw across all of them. The genre order
+        (shuffled supporting genres) already varies the candidate
+        pool from episode to episode, so no history is tracked.
         """
 
         usable = [

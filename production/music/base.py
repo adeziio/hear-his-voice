@@ -68,9 +68,11 @@ class MusicProvider:
         tags (a list of lowercase words, possibly empty) into
         destination_dir. content is the optional episode content
         dict (title/summary/narration) used to match the track's
-        energy to the video - no history is tracked, so the same
-        track may be picked back to back; selection is pure random
-        among energy-compatible tracks. Returns a metadata dict:
+        energy to the video. Selection is random among
+        energy-compatible tracks; implementations may keep a small
+        history (for example, not repeating the previous episode's
+        track) so the same song does not play back to back.
+        Returns a metadata dict:
 
             {
                 "provider": "...",
