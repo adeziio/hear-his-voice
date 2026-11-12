@@ -220,6 +220,15 @@ class SnapGenAiProvider:
 
             self.settings = {}
 
+        # The config now organizes snapgenai settings under a model
+        # selector with shared settings at the parent level. Pick the
+        # sub-config for the configured model (defaulting to "muse")
+        # and merge it with the parent's shared settings so all
+        # subsequent _setting reads point at the right model's options.
+        model = self.settings.get("model", "muse")
+        model_config = self.settings.get(model, {})
+        self.settings = {**self.settings, **model_config}
+
         self.progress_callback = (
             progress_callback
         )
@@ -2451,10 +2460,42 @@ class SnapGenAiProvider:
 
             self._human_pause()
 
-            self._select_aspect_ratio(
-                driver
-            )
+            # Select aspect ratio when configured
+            if self._setting("aspect_ratio_target"):
+                self._select_page_option(
+                    driver,
+                    "aspect ratio",
+                    self._setting("aspect_ratio_target"),
+                    "aspect_ratio_button_selector",
+                    "aspect_ratio_timeout_seconds",
+                    15
+                )
 
+            # Select duration when configured (grok-lite)
+            if self._setting("duration_target"):
+                self._select_page_option(
+                    driver,
+                    "duration",
+                    self._setting("duration_target"),
+                    "duration_button_selector",
+                    "duration_timeout_seconds",
+                    15
+                )
+                self._human_pause()
+
+            # Select resolution when configured (grok-lite)
+            if self._setting("resolution_target"):
+                self._select_page_option(
+                    driver,
+                    "resolution",
+                    self._setting("resolution_target"),
+                    "resolution_button_selector",
+                    "resolution_timeout_seconds",
+                    15
+                )
+                self._human_pause()
+
+            self._enter_prompt(driver, prompt)
             self._human_pause()
 
             self._enter_prompt(

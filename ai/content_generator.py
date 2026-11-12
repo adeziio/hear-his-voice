@@ -33,8 +33,8 @@ DEFAULT_WORDS_PER_SECOND = 2.9
 def _duration_target_seconds(config):
     """
     Returns the SnapGenAI clip length in seconds, read from
-    config/ai_models.json -> models.video_model.snapgenai.duration_target
-    (for example "8s").
+    config/ai_models.json -> models.video_model.snapgenai (shared
+    settings, e.g. "10s").
 
     One clip carries one narration sentence, so this is the maximum
     spoken length any one segment should reach before it is divided. The
@@ -49,14 +49,11 @@ def _duration_target_seconds(config):
         .get("snapgenai", {})
     )
 
+    value = str(snapgenai.get("duration", "")).strip()
+
     match = re.fullmatch(
         r"(\d+(?:\.\d+)?)\s*s?",
-        str(
-            snapgenai.get(
-                "duration_target",
-                ""
-            )
-        ).strip(),
+        value,
         flags=re.IGNORECASE,
     )
 
@@ -64,9 +61,7 @@ def _duration_target_seconds(config):
 
         return DEFAULT_SECONDS_PER_VISUAL
 
-    seconds = float(
-        match.group(1)
-    )
+    seconds = float(match.group(1))
 
     if seconds <= 0:
 
