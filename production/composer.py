@@ -647,6 +647,13 @@ class Composer:
             - 4
         )
 
+        max_lines = int(
+            self.captions_config.get(
+                "max_lines",
+                4
+            )
+        )
+
         for cue in cues:
 
             cue_start = float(
@@ -672,77 +679,37 @@ class Composer:
 
                 continue
 
-            # Keep one consistent font size throughout the video. Long
-            # sentences wrap onto additional lines; they do not shrink on a
-            # cue-by-cue basis.
-            text, _ = (
-                self._wrap_caption_text(
-                    text,
-                    font_path,
-                    fixed_font_size,
-                    stroke_width,
-                    safe_text_width,
-                    allow_font_resize=False,
-                )
-            )
-
+            caption_words = cue.get("words") or []
+            wrapped_text, _ = self._wrap_caption_text(text, font_path, fixed_font_size, stroke_width, safe_text_width, allow_font_resize=False)
+            segments = []
+            if len(str(wrapped_text).splitlines()) <= max_lines:
+                segments.append((wrapped_text, caption_words, cue_start, cue_end))
+            elif caption_words:
+                chunks = self._split_caption_words_into_chunks(caption_words, font_path, fixed_font_size, stroke_width, safe_text_width, max_lines)
+                for ci, cw in enumerate(chunks):
+                    ct = " ".join(str(w.get("word", "")).strip() for w in cw)
+                    wc, _ = self._wrap_caption_text(ct, font_path, fixed_font_size, stroke_width, safe_text_width, allow_font_resize=False)
+                    cs = float(cw[0].get("start", cue_start))
+                    ce = float(chunks[ci + 1][0].get("start", cue_end)) if ci + 1 < len(chunks) else cue_end
+                    segments.append((wc, cw, cs, ce))
+            else:
+                segments.append((wrapped_text, caption_words, cue_start, cue_end))
             try:
-                if font_path:
-                    font_pil = ImageFont.truetype(font_path, fixed_font_size)
-                else:
-                    font_pil = ImageFont.load_default()
+                font_pil = ImageFont.truetype(font_path, fixed_font_size) if font_path else ImageFont.load_default()
             except Exception:
                 font_pil = ImageFont.load_default()
-
-            caption_words = cue.get("words", [])
-            states = caption_words or [{
-                "start": cue_start,
-                "end": cue_end,
-            }]
-
-            for word_index, word in enumerate(states):
-                state_start = max(
-                    cue_start,
-                    float(word.get("start", cue_start))
-                )
-                state_end = cue_end
-
-                if word_index + 1 < len(states):
-                    state_end = min(
-                        cue_end,
-                        float(states[word_index + 1].get("start", cue_end))
-                    )
-
-                if state_end <= state_start:
+            for seg_text, seg_words, seg_start, seg_end in segments:
+                if seg_end <= seg_start:
                     continue
-
-                img = self._make_caption_image(
-                    text,
-                    font_pil,
-                    text_color,
-                    highlight_color,
-                    stroke_color,
-                    stroke_width,
-                    word_index if caption_words else None,
-                    caption_words,
-                )
-                clip = ImageClip(np.array(img))
-
-                caption_clips.append(
-                    clip
-                    .with_position(
-                        (
-                            "center",
-                            origin_y
-                        )
-                    )
-                    .with_start(
-                        state_start
-                    )
-                    .with_end(
-                        state_end
-                    )
-                )
+                states = seg_words or [{"start": seg_start, "end": seg_end}]
+                for wi, w in enumerate(states):
+                    ss = max(seg_start, float(w.get("start", seg_start)))
+                    se = seg_end if wi + 1 >= len(states) else min(seg_end, float(states[wi + 1].get("start", seg_end)))
+                    if se <= ss:
+                        continue
+                    img = self._make_caption_image(seg_text, font_pil, text_color, highlight_color, stroke_color, stroke_width, wi if seg_words else None, seg_words)
+                    clip = ImageClip(np.array(img))
+                    caption_clips.append(clip.with_position(("center", origin_y)).with_start(ss).with_end(se))
 
         return caption_clips
 
@@ -1104,6 +1071,51 @@ class Composer:
             ),
             effective_size
         )
+
+    def _split_caption_words_into_chunks(
+        self,
+        caption_words,
+        font_path,
+        font_size,
+        stroke_width,
+        max_width,
+        max_lines,
+    ):
+        """
+        Splits a list of timed words into chunks where each chunk,
+        when wrapped, produces no more than max_lines. Keeps long
+        sentences from overflowing the caption frame while still
+        aiming for one complete sentence per caption frame.
+        """
+        chunks = []
+        current_chunk = []
+
+        for word in caption_words:
+            trial_chunk = current_chunk + [word]
+            trial_text = " ".join(
+                str(w.get("word", "")).strip() for w in trial_chunk
+            )
+            wrapped, _ = self._wrap_caption_text(
+                trial_text,
+                font_path,
+                font_size,
+                stroke_width,
+                max_width,
+                allow_font_resize=False,
+            )
+            line_count = len(str(wrapped).splitlines())
+
+            if line_count > max_lines and current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = [word]
+            else:
+                current_chunk = trial_chunk
+
+        if current_chunk:
+
+            chunks.append(current_chunk)
+
+        return chunks
 
     @staticmethod
     def _caption_line_width(
