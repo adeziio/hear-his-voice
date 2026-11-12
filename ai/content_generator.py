@@ -1860,16 +1860,14 @@ class ContentGenerator(
                 reference,
             ) or reference
 
-        # The reference belongs in the title, so the episode is
-        # identifiable from the listing without a separate field.
-        #
-        # The separator is an em dash, and the reference is never
-        # wrapped in parentheses: "Title — Book Chapter:Verse" is the
-        # format this channel publishes with. A title carries no full
-        # stop, because the reference supplies the ending.
+        # The reference comes first so the episode is identifiable from
+        # the listing without a separate field. The separator is an
+        # em dash, and the reference uses an en dash (–) between the
+        # verse ranges. A title carries no full stop, because the
+        # reference supplies the ending.
         title = "{} — {}".format(
-            title.rstrip(" ."),
             reference,
+            title.rstrip(" ."),
         )
 
         summary = str(
