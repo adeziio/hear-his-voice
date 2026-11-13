@@ -941,9 +941,9 @@ def test_the_prompt_identifies_each_character_by_name_and_role():
     assert "name and the role or title the passage gives" in prompt
     assert "identified by who they are in this passage rather than by" in prompt
     assert "a familiar name alone" in prompt
-    assert "Never merge two different people" in prompt
-    assert "never swap one biblical character for another" in prompt
-    assert "does not establish in this scene" in prompt
+    assert "Give each person their own distinct biblical identity" in prompt
+    assert "keep each character separate and distinct" in prompt
+    assert "show only people the passage establishes" in prompt
 
 
 def test_the_visual_checker_judges_character_identity():
@@ -965,8 +965,50 @@ def test_the_visual_checker_judges_character_identity():
     assert "name and the role or title the passage gives them" in checker
     assert "identified by who they are in this passage rather than by" in checker
     assert "a familiar name alone" in checker
-    assert "one biblical character for another" in checker
-    assert "guesses an identity the passage does not establish" in checker
+    assert "keep their own distinct biblical identity" in checker
+    assert "each character separate from the others" in checker
+    assert "only people the passage establishes shown" in checker
+
+
+def test_the_prompt_describes_crowds_as_ancient_biblical_people():
+
+    # A crowd or group of people must never be rendered as ambiguous
+    # modern-day people; they must be described as ancient biblical-era
+    # people appropriate to the passage.
+    generator, _ = make_generator()
+
+    prompt = generator.build_segment_prompt(
+        scripture(),
+        generator.build_segments({"text": STORM_NARRATION}),
+        0,
+    )
+
+    assert "Describe every crowd or group of people as ancient biblical-era" in prompt
+    assert "first-century Jewish people in period clothing" in prompt
+    assert "matching the identity the passage gives them" in prompt
+
+
+def test_the_visual_checker_judges_period_appropriate_people():
+
+    # The judge rejects a visual that renders a crowd or group of people
+    # as ambiguous modern-day people instead of ancient biblical-era
+    # people appropriate to the passage.
+    generator, _ = make_generator()
+
+    segments = list(EPISODE_001_SHIPPED_SEGMENTS)
+
+    checker = generator.build_visual_verification_prompt(
+        scripture(reference="Matthew 14:22-33"),
+        segments,
+        1,
+        "Style: realistic. A boat on the lake.",
+    )
+
+    assert "Period-appropriate people" in checker
+    assert "crowd or group of" in checker
+    assert "ancient biblical-era people appropriate" in checker
+    assert "first-century Jewish people in period clothing" in checker
+    assert "matching the identity the passage gives them" in checker
 
 
 def test_the_prompt_pins_the_visual_to_this_moment_in_the_chronology():
