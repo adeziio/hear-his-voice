@@ -185,7 +185,7 @@ class Composer:
         # last spoken word, so the ending never feels cut off and
         # nothing is ever trimmed.
 
-        video_duration = narration_duration + 0.5
+        video_duration = narration_duration + 4
 
         output_path = (
             Path(
@@ -1300,6 +1300,9 @@ class Composer:
                 [
                     afx.AudioLoop(
                         duration=video_duration
+                    ),
+                    afx.AudioFadeOut(
+                        duration=2.0
                     )
                 ]
             ).with_volume_scaled(
