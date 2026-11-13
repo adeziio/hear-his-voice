@@ -924,6 +924,51 @@ def test_the_prompt_requires_historical_setting_and_character_context():
     assert "Never show modern clothing" in prompt
 
 
+def test_the_prompt_identifies_each_character_by_name_and_role():
+
+    # A familiar name is not enough: the passage's Marys are different
+    # people, so the visual prompt must identify each person by name
+    # and the role or title the passage gives them - never merged,
+    # swapped, or substituted for one another.
+    generator, _ = make_generator()
+
+    prompt = generator.build_segment_prompt(
+        scripture(),
+        generator.build_segments({"text": STORM_NARRATION}),
+        0,
+    )
+
+    assert "name and the role or title the passage gives" in prompt
+    assert "identified by who they are in this passage rather than by" in prompt
+    assert "a familiar name alone" in prompt
+    assert "Never merge two different people" in prompt
+    assert "never swap one biblical character for another" in prompt
+    assert "does not establish in this scene" in prompt
+
+
+def test_the_visual_checker_judges_character_identity():
+
+    # The judge rejects a visual that puts the wrong biblical figure in
+    # the scene, or guesses an identity the passage never establishes.
+    generator, _ = make_generator()
+
+    segments = list(EPISODE_001_SHIPPED_SEGMENTS)
+
+    checker = generator.build_visual_verification_prompt(
+        scripture(reference="Matthew 14:22-33"),
+        segments,
+        1,
+        "Style: realistic. A boat on the lake.",
+    )
+
+    assert "Character identity" in checker
+    assert "name and the role or title the passage gives them" in checker
+    assert "identified by who they are in this passage rather than by" in checker
+    assert "a familiar name alone" in checker
+    assert "one biblical character for another" in checker
+    assert "guesses an identity the passage does not establish" in checker
+
+
 def test_the_prompt_pins_the_visual_to_this_moment_in_the_chronology():
 
     # A sentence about one beat must never be shown as a later or earlier
