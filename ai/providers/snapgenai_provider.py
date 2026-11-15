@@ -2470,6 +2470,7 @@ class SnapGenAiProvider:
                     "aspect_ratio_timeout_seconds",
                     15
                 )
+                self._human_pause()
 
             # Select duration when configured (grok-lite)
             if self._setting("duration_target"):
@@ -2495,8 +2496,6 @@ class SnapGenAiProvider:
                 )
                 self._human_pause()
 
-            self._enter_prompt(driver, prompt)
-            self._human_pause()
 
             self._enter_prompt(
                 driver,
