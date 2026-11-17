@@ -126,8 +126,8 @@ class ContentGenerationError(
 # The AI directs the episode; it does not author the Scripture.
 #
 # Visuals are directed ONE narration word-chunk at a time. Each focused
-# call returns exactly one visual object for the single narration segment it was
-# given, so the model is never asked to hold the whole story in one
+# call returns exactly one visual object for the assigned chunk, while
+# adjacent narration and the source passage clarify its story context.
 # response - the failure mode that collapsed an episode into a handful
 # of repeated establishing shots that contradicted the narration around
 # them. The narration itself is written by write_narration() under
