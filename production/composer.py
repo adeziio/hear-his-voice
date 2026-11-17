@@ -447,7 +447,10 @@ class Composer:
                     needed = video_duration - start
                 else:
 
-                    needed = segment_ends[index] - start
+                    # Duration chains to the next clip's start so
+                    # clips abut perfectly (no black gap between
+                    # transitions).
+                    needed = segment_starts[index + 1] - start
 
                 if needed <= 0:
 
