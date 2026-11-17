@@ -491,6 +491,26 @@ class FreeSafeMusicProvider(MusicProvider):
             "background-music.mp3"
         )
 
+        # Reuse an existing track when present so the user can delete
+        # only the music/ folder to force a new background track.
+        if track_path.is_file() and track_path.stat().st_size > 0:
+
+            self.notify(
+                "Background music already exists; reusing existing track."
+            )
+
+            return {
+                "_reused_existing": True,
+                "provider": self.name,
+                "title": "Existing Track",
+                "artist": "",
+                "source_url": "",
+                "license": "Reused existing track",
+                "tags": [],
+                "mp3_url": "",
+                "file": str(track_path),
+            }
+
         self.notify(
             "Downloading music: "
             f"{track['title']}"

@@ -236,6 +236,29 @@ def generate_narration(
         "words.json"
     )
 
+    # Reuse existing narration artifacts when both are present so the
+    # user can delete only the audio/ folder to force regeneration.
+    if audio_path.is_file() and words_path.is_file():
+
+        report(
+            "Narration audio already exists; reusing existing files."
+        )
+
+        duration = _audio_duration(
+            audio_path
+        )
+
+        return {
+            "audio_path": str(
+                audio_path
+            ),
+            "words_path": str(
+                words_path
+            ),
+            "duration": duration,
+            "voice": voice,
+        }
+
     report(
         f"Generating narration audio ({voice})..."
     )

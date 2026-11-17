@@ -331,15 +331,29 @@ class ProductionPipeline:
         )
 
         captions_path = (
-            write_srt(
-                cues,
-                episode_directory
-                /
-                "captions"
-                /
-                "captions.srt"
-            )
+            episode_directory
+            /
+            "captions"
+            /
+            "captions.srt"
         )
+
+        # Reuse existing captions when present so the user can delete
+        # only the captions/ folder to force regeneration. Cues are
+        # still built in memory from the narration word timings so the
+        # composer always has them.
+        if captions_path.is_file() and captions_path.stat().st_size > 0:
+
+            print(
+                "Captions already exist; reusing existing file."
+            )
+
+        else:
+
+            captions_path = write_srt(
+                cues,
+                captions_path
+            )
 
         # 5. Compose and render
 
@@ -672,6 +686,11 @@ class ProductionPipeline:
 
         if not track_path:
 
+            return
+
+        # Skip cleanup for tracks reused from a previous run so the
+        # user's satisfied music/ folder is not deleted.
+        if music_metadata.get("_reused_existing"):
             return
 
         try:
