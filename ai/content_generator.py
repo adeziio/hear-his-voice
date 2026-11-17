@@ -125,8 +125,8 @@ class ContentGenerationError(
 
 # The AI directs the episode; it does not author the Scripture.
 #
-# Visuals are directed ONE narration sentence at a time. Each focused
-# call returns exactly one visual object for the single sentence it was
+# Visuals are directed ONE narration word-chunk at a time. Each focused
+# call returns exactly one visual object for the single narration segment it was
 # given, so the model is never asked to hold the whole story in one
 # response - the failure mode that collapsed an episode into a handful
 # of repeated establishing shots that contradicted the narration around
@@ -286,247 +286,6 @@ def _normalize_words(text):
         r"[a-z0-9]+",
         str(text or "").lower()
     )
-
-
-# Named people the passage may establish and place in a scene.
-# Kept short and general: any capitalised word of three or more letters
-# that is not an ordinary sentence-starter can be a person, place, or
-# title. The caller narrows this to the people that actually appear.
-_CHARACTER_WORDS = frozenset(
-    """
-    jesus peter john james andrew philip bartholomew thomas matthew
-    james jude simon judas lazarus mary martha zacchaeus nicodemus
-    pilate herod caesar cleopas disciples crowd Pharisees sadducees
-    scribes elders chief priests prophets apostles witnesses angels
-    """.split()
-)
-
-# Verbs that move a person from one place or state to another.
-_MOVEMENT_VERBS = frozenset(
-    """
-    went came went up came down came walking walked stepped climbed
-    got entered left departed stood standing kneeling lying lying down
-    sleeping asleep praying sitting sitting down arrived approached
-    drew near reached out took hold touched went ahead remained stayed
-    alone apart together into out of onto off toward against
-    """.split()
-)
-
-# Place words that anchor a person to a location.
-_PLACE_WORDS = frozenset(
-    """
-    shore mountain boat sea water tomb house city road way street
-    wilderness garden synagogue temple wilderness desert hill hillside
-    valley plain field shore bank deep middle stern bow deck
-    """.split()
-)
-
-# Words from _MOVEMENT_VERBS that are prepositions or particles rather
-# than verbs of motion. They are excluded from the agent-detection scan
-# in _character_positions() so a preposition like "of" in "watch of the
-# night" doesn't falsely appear before the subject and suppress that
-# character's established position.
-_POSITION_PREPOSITIONS = frozenset(
-    """
-    up down out of into onto off toward against near ahead alone apart together
-    """.split()
-)
-
-
-def _character_positions(passage_text):
-    """
-    Extract where named characters are located from the passage text.
-
-    Scans the passage sentence by sentence for statements that place a
-    named character at a location or in a state, and returns a timeline
-    of ``(character, position, sentence)`` entries in passage order.
-    The heuristic looks for a named person word together with a movement
-    or location verb and a place word in the same sentence, catching
-    statements like ``"Jesus came walking on the water toward them"``
-    without hardcoding any scene.
-
-    Returns a tuple ``(timeline, current)`` where ``timeline`` is a list
-    of ``(character, position, sentence)`` and ``current`` is a dict
-    mapping each character to their last known position description.
-    """
-    value = str(passage_text or "")
-
-    # Split into sentences using the same splitter the segmenter uses,
-    # so positions line up with the passage's own sentence boundaries.
-    from scripture.segmenter import split_sentences, _protected_spans
-
-    sentences = split_sentences(value, _protected_spans(value))
-
-    timeline = []
-    current = {}
-
-    for sentence in sentences:
-        words = _normalize_words(sentence)
-
-        # Find the named people this sentence mentions.
-        mentioned = [
-            word
-            for word in _CHARACTER_WORDS
-            if word in words
-        ]
-
-        if not mentioned:
-
-            continue
-
-        # Only count genuine motion verbs, not prepositions/particles
-        # (e.g. "up" in "Cheer up!" or "of" in "watch of the night").
-        has_movement = any(
-            verb in words
-            for verb in _MOVEMENT_VERBS
-            if verb not in _POSITION_PREPOSITIONS
-        )
-
-        has_place = any(
-            place in words
-            for place in _PLACE_WORDS
-        )
-
-        if not (has_movement or has_place):
-
-            continue
-
-        position = sentence.strip()
-
-        # Only assign the position to characters who are the agent or
-        # subject of the movement/location action. A character whose name
-        # appears before a movement verb in the sentence is likely
-        # performing the action; a character whose name appears only after
-        # the movement verb is likely a destination, observer, or dialogue
-        # participant whose location this sentence does not establish.
-        # This keeps a stale or incidental mention from overwriting a
-        # character's last explicitly established position.
-        #
-        # Preposition/particle words (e.g. "of" in "watch of the night",
-        # "toward" in "walked toward Jesus") are excluded from the agent
-        # scan so they don't falsely appear before the subject.
-        movement_indices = [
-            words.index(verb)
-            for verb in _MOVEMENT_VERBS
-            if verb in words
-            and verb not in _POSITION_PREPOSITIONS
-        ]
-        first_movement = min(movement_indices) if movement_indices else None
-
-        for person in mentioned:
-
-            try:
-
-                person_index = words.index(person)
-
-            except ValueError:
-
-                continue
-
-            if first_movement is None or person_index < first_movement:
-
-                current[person] = position
-
-                timeline.append(
-                    (person, position, sentence.strip())
-                )
-
-    return timeline, current
-
-
-def _current_positions(positions):
-    """
-    Returns only the last (current) position for each character.
-
-    ``positions`` may hold several timeline entries for the same
-    character (one per passage sentence that mentioned them).
-    Keeping only the last entry per character makes the position block
-    unambiguous: the director and the checker see where each person is
-    at this point in the story, not a history of everywhere they have
-    been. For example, for the Peter-sinking segment of Matthew 14,
-    Jesus's last entry is "Peter walked on the waters to come to
-    Jesus" (Jesus on the water) rather than competing with an earlier
-    "Jesus at the boat" entry that could let a shore placement slip
-    past the verifier.
-    """
-    current = {}
-
-    for character, position in positions:
-
-        current[character] = position
-
-    return list(current.items())
-
-
-def _positions_at_segment(
-    passage_text,
-    segment_index,
-    total_segments
-):
-    """
-    Returns the character positions established by the passage up to
-    the point this narration segment falls in the story.
-
-    Segments are chronological word chunks of the narration, which
-    retells the passage in order. The passage's position timeline is
-    prorated across the segments so each segment sees the positions
-    the passage has established at roughly that point in the story.
-
-    Returns a list of ``(character, position)`` pairs, or an empty
-    list when the passage establishes no positions.
-    """
-    timeline, _ = _character_positions(passage_text)
-
-    if not timeline:
-
-        return []
-
-    # Split the passage into sentences so each timeline entry can be
-    # located by the passage sentence that established it. The cutoff is
-    # expressed in passage sentences, not timeline-entry index.
-    #
-    # Timeline-entry index does not track story chronology: not every
-    # passage sentence establishes a position, so a position established
-    # late in the passage can sit late in the timeline while its sentence
-    # actually falls inside an earlier word-count segment (the rescue in
-    # Matthew 14:22-33 is one such case - its timeline entry would be
-    # prorated to a later segment than the one that narrates it). Basing
-    # the cutoff on the establishing sentence keeps positions consistent
-    # across consecutive narration chunks: every segment sees every
-    # position the passage has established up to the point that segment
-    # covers, and no position is stranded in a segment after the moment
-    # it depicts.
-    from scripture.segmenter import split_sentences, _protected_spans
-
-    sentences = split_sentences(passage_text, _protected_spans(passage_text))
-    sentence_index = {
-        sentence.strip(): index
-        for index, sentence in enumerate(sentences)
-    }
-    total_sentences = len(sentences)
-
-    # The end of the passage fraction this segment covers.
-    passage_cutoff = (
-        (segment_index + 1) * total_sentences
-    ) // max(total_segments, 1)
-
-    relevant = [
-        (character, position)
-        for character, position, sentence in timeline
-        if sentence_index.get(sentence.strip(), 0) <= passage_cutoff
-    ]
-
-    # Keep every timeline entry: each one records when a named
-    # character's position changed in the passage. Dropping later
-    # entries for the same character would lose position changes -
-    # for example, Jesus going from "sent the disciples ahead" to
-    # "walking on the water toward them."
-    positions = [
-        (character, position)
-        for character, position in relevant
-    ]
-
-    return positions
 
 
 def _name_key(word):
@@ -1117,17 +876,7 @@ class ContentGenerator(
         index,
         feedback=None
     ):
-        """
-        Builds the visual-direction prompt for ONE narration sentence.
-
-        A single sentence needs a single focused call: handing the model
-        every sentence at once invites it to collapse the whole story
-        into a few generic establishing shots. This prompt gives the
-        model the full passage and the full telling for context, but
-        marks exactly one sentence - with the narration immediately
-        before and after it - as the one to direct. The output is one
-        visual object, so the model cannot merge or drop beats.
-        """
+        """Build one self-contained visual prompt for a narration word chunk."""
         channel = self.channel_config.get("channel", {})
         name = str(channel.get("name", "Hear His Voice"))
         description = str(channel.get("description", ""))
@@ -1142,78 +891,22 @@ class ContentGenerator(
         segment = segments[index]
         before = (
             segments[index - 1] if index > 0
-            else "(nothing - this sentence opens the narration)"
+            else "(this is the opening segment)"
         )
         after = (
             segments[index + 1] if index + 1 < len(segments)
-            else "(nothing - this sentence closes the narration)"
+            else "(this is the final segment)"
         )
-
-        # The whole telling, for context only. A plain numbered list,
-        # not SEGMENT markers, so the one marked sentence below stays
-        # the only thing the model is asked to direct.
         full_telling = "\n".join(
-            f"{position + 1}. {text}"
-            for position, text in enumerate(segments)
+            f"{position + 1}. {part}"
+            for position, part in enumerate(segments)
         )
-
-        # Where the passage has each named character at this point in
-        # the story. The director must not place a character where the
-        # passage contradicts - for example, Jesus on the shore when the
-        # passage has him already walking on the water toward the
-        # disciples. Computed before the prompt assembly so it can be
-        # woven into the single parenthesised expression.
-        positions = _positions_at_segment(
-            str(scripture.get("text") or ""),
-            index,
-            len(segments),
-        )
-
-        if positions:
-
-            # Keep only the last position per character so the position
-            # block is unambiguous: each named person appears once with
-            # their current location, not a history of everywhere they
-            # have been. This stops a stale entry (e.g. "Jesus at the
-            # boat") from competing with the current one ("Jesus walking
-            # on the water") and letting a contradictory placement slip
-            # past the director and the verifier.
-            current_positions = _current_positions(positions)
-
-            position_lines = "\n".join(
-                f"  - {character}: {position}"
-                for character, position in current_positions
-            )
-
-            position_block = (
-                "CHARACTER POSITIONS FROM THE PASSAGE\n"
-                "The passage places people as follows at this point "
-                "in the story. Never place a character anywhere else:\n"
-                + position_lines
-                + "\n\n"
-            )
-
-        else:
-
-            position_block = ""
 
         prompt = (
             "You are the visual director for \""
             + name
-            + "\", a short-form channel that lets Scripture speak "
-            "for itself.\n\n"
-            "CRITICAL - YOU DO NOT WRITE THE SCRIPTURE\n"
-            "The passage below is the exact "
-            + scripture["translation"]
-            + " text, and it is the authority for this episode. The "
-            "narration was already written from that passage and is "
-            "fixed: the narrator speaks it exactly as written and it is "
-            "captioned exactly as spoken. You must NEVER generate, "
-            "paraphrase, rewrite, summarise, expand, correct, or invent "
-            "any part of the passage or the narration, and you must not "
-            "echo either back in your answer. Your only job is to decide "
-            "what the viewer should SEE while ONE sentence of that "
-            "narration is spoken.\n\n"
+            + "\", creating one realistic biblical-era AI video clip "
+            "for a narrated Scripture episode.\n\n"
             "CHANNEL DESCRIPTION\n"
             + description
             + "\n\nSCRIPTURE REFERENCE\n"
@@ -1221,166 +914,84 @@ class ContentGenerator(
             + " ("
             + scripture["translation"]
             + ")\n\n"
-            "THE PASSAGE - THE SOURCE OF EVERYTHING SPOKEN\n"
+            "THE SOURCE PASSAGE\n"
             + str(scripture.get("text") or "").strip()
             + "\n\n"
-            "THE FULL NARRATION - CONTEXT ONLY\n"
-            "This is the whole telling, in order. Read it to know who "
-            "the people are and what has already happened. You are NOT "
-            "directing all of it - only the one marked sentence below.\n"
+            "FULL NARRATION IN ORDER - CONTEXT ONLY\n"
             + full_telling
             + "\n\n"
-            "THE SENTENCE YOU ARE DIRECTING\n"
-            "Write exactly one visual for this sentence and nothing "
-            "else. Depict only what this sentence has happening right "
-            "now: an ask is shown as the asking, a cry as the crying "
-            "out, a decision as the deciding - never the doing that "
-            "follows it. The two indented lines are context for this "
-            "moment - they are not part of what you depict.\n"
-            f"SEGMENT {index + 1}: {segment}\n"
-            f"  JUST BEFORE: {before}\n"
-            f"  JUST AFTER: {after}\n\n"
-            + position_block
-            + "VISUAL PROMPT RULES\n"
-            "Return one visual object for this ONE sentence. Its "
-            "search_query is a single, complete SnapGenAI visual prompt "
-            "for this sentence's clip. It must depict the one clear "
-            "event or action this sentence narrates - its setting, its "
-            "people, and its emotional moment - and nothing else. "
-            "Anchor the shot at this exact point in the passage's "
-            "chronology: read the passage above to find where this "
-            "sentence falls in the story, and show only what is "
-            "happening at that point. Never depict an event from a "
-            "later or an earlier part of the passage - no "
-            "flash-forward to what happens next and no flashback to "
-            "what already happened. If the sentence is a cry, a "
-            "question, a statement, or a decision, depict exactly that "
-            "moment, not the action it leads to. Never combine the "
-            "events of two segments into one prompt, and "
-            "never reach into the next sentence's beat before the "
-            "narration gets there. Do not reuse a generic "
-            "overall-passage establishing shot. Make the prompt "
-            "straightforward and descriptive: identify the main scene, "
-            "subject, setting, action, and atmosphere, and give the "
-            "camera framing that fits the moment (for example "
-            "close-up, medium shot, wide shot, or establishing shot). "
-            "Begin with 'Style: realistic.' Do not write a "
-            "stock-footage search query, narration, explanation, or "
-            "list.\n"
-            "The prompt must stand alone: SnapGenAI sees only the "
-            "prompt, so resolve every pronoun and vague reference to "
-            "the actual people the passage establishes. Write 'Jesus "
-            "and Peter climb into the boat', not 'they climb into the "
-            "boat', whenever the passage names who 'they' are. Only "
-            "name people the passage itself establishes - never guess "
-            "an identity.\n"
-            "Name every person the passage names by the name and the "
-            "role or title the passage gives them, so each person is "
-            "identified by who they are in this passage rather than by "
-            "a familiar name alone. Give each person their own distinct "
-            "biblical identity from the passage, keep each character "
-            "separate and distinct, and show only people the passage "
-            "establishes in this scene.\n"
-            "Name Jesus explicitly whenever he appears in a scene: "
-            "always write 'Jesus', never an unnamed stand-in such as "
-            "'a lone figure', 'a solitary figure', or 'a distant man'. "
-            "Naming him is not describing him: write 'Jesus stands on "
-            "the hillside in prayer', never 'a solitary figure "
-            "prays'. Never describe his physical appearance - no "
-            "face, hair, build, or clothing details for him. Show him "
-            "by his actions, his position, and the people around "
-            "him.\n"
-            "When Jesus is not in the scene, describe the other visible "
-            "people plainly and historically: who they are in the "
-            "story, and their period-appropriate appearance, clothing, "
-            "and role. For first-century Jewish people, use plausible "
-            "Levantine features and simple wool or linen tunics, "
-            "cloaks, head coverings, and sandals. Represent every other "
-            "group according to the identity the passage gives them.\n"
-            "Describe every crowd or group of people as ancient biblical-era "
-            "people appropriate to the passage - first-century Jewish people "
-            "in period clothing and appearance - matching the identity the "
-            "passage gives them.\n"
-            "When you name a character with a title (for example, "
-            "\"John the Baptist\", \"Zacchaeus the tax collector\", "
-            "\"Peter the apostle\"), always use the full name with its "
-            "title so the video model knows exactly who is on screen. "
-            "Never abbreviate a character to a first name alone when a "
-            "qualifying title is established in the passage.\n"
-            "Set every prompt in the biblical era: stone and mudbrick "
-            "buildings, ancient streets, fields, hillsides, shores, "
-            "boats, and period objects. Never show modern clothing, "
-            "hairstyles, buildings, roads, vehicles, technology, or any "
-            "modern environment.\n"
-            "Keep the prompt focused and concise - include only the "
-            "details that support the narrated event. Never invent "
-            "actions, people, objects, or outcomes the passage does not "
-            "give.\n"
-            "Carry continuity from the JUST BEFORE line: if the "
-            "previous sentence is in the same place and situation, keep "
-            "the same location, positions, and conditions here too, and "
-            "change them only where the narration itself changes them - "
-            "a move, an entrance, a departure, or a change of time or "
-            "weather. Never move the scene onto a shore, onto land, or "
-            "into a building, and never turn night into dawn or "
-            "daylight, unless the narration itself says so.\n"
-            "Place people exactly where the narration places them. "
-            "Where the narration does not say where someone is, the "
-            "passage above decides it: put each person where the "
-            "passage has them at this point in the story, and never "
-            "place a character where the passage contradicts - when "
-            "the passage keeps the people together in the boat, do "
-            "not move Jesus to the shore. If "
-            "someone is outside a place - outside the tomb, on the "
-            "shore, at a distance, in the boat, before a closed door - "
-            "keep them outside it unless the narration says they "
-            "entered. Never move a scene indoors, into a city, or onto "
-            "a road the narration never mentions.\n"
-            "Where the passage keeps Jesus apart from the group - "
-            "walking on the water, standing apart to pray, no longer "
-            "in the tomb - keep him apart for as long as the passage "
-            "does, and never move him into the boat, the house, or the "
-            "crowd unless the narration says he entered.\n"
-            "Depict each action in a physically plausible position: "
-            "someone asleep lies down, someone praying kneels or stands "
-            "with head bowed, someone travelling is on their feet on "
-            "the way, someone addressing a crowd faces the crowd.\n"
-            "Never introduce a condition that contradicts one the "
-            "narration still holds true: no calm water in a violent "
-            "storm, no bright daylight in a narrated night, no empty "
-            "street in a narrated crowd. Change a condition only when "
-            "the narration says it changed.\n"
-            "Do not add details, people, objects, or events that change "
-            "the context of the scene the narration describes.\n\n"
+            "THE ASSIGNED NARRATION SEGMENT - VISUAL FOCUS\n"
+            + segment
+            + "\n\n"
+            "IMMEDIATELY BEFORE\n"
+            + before
+            + "\nIMMEDIATELY AFTER\n"
+            + after
+            + "\n\n"
+            "Create one clear, self-contained visual scene that best "
+            "illustrates the main event or moment expressed by the "
+            "ASSIGNED NARRATION SEGMENT. This segment is a word-count "
+            "chunk and may begin or end in the middle of a sentence; "
+            "use the adjacent narration to understand its grammar and "
+            "meaning, rather than treating the fragment as an isolated "
+            "complete sentence.\n\n"
+            "The assigned segment determines what the clip is about. "
+            "Use the full narration and Scripture passage only to clarify "
+            "who is involved, the biblical setting, and the order of events. "
+            "Do not replace the assigned moment with a different, more "
+            "familiar event from this passage or from elsewhere in Scripture. "
+            "Do not show a later or earlier event instead of the moment "
+            "being narrated.\n\n"
+            "Make the scene concrete and recognizable: show the relevant "
+            "person or people performing the narrated action, or show a "
+            "closely related visual representation when the segment is "
+            "mainly dialogue, a quotation, a prophecy, or an abstract "
+            "statement. A relevant speaker, listener, scroll, or named "
+            "place may represent such a moment. Do not use generic scenery "
+            "or an unrelated biblical scene as a substitute. The clip does "
+            "not need to illustrate every word literally, but its connection "
+            "to this segment must be clear.\n\n"
+            "Only include characters who belong in this particular moment. "
+            "Name the relevant biblical characters explicitly, using their "
+            "full name and title when the passage establishes one. Do not "
+            "add unrelated characters or make a different person perform "
+            "the narrated action. Include Jesus by name when he is actually "
+            "part of this moment; do not insert him into scenes where he is "
+            "not present.\n\n"
+            "Keep the setting and actions consistent with what the passage "
+            "establishes. Do not invent a specific location, movement, "
+            "interaction, or outcome that changes the meaning of the scene. "
+            "When the text does not specify a person's exact position, do "
+            "not invent a restrictive location rule.\n\n"
+            "Use a historically plausible biblical-era setting: ancient "
+            "stone or mudbrick buildings, streets, homes, landscapes, and "
+            "period-appropriate clothing and objects. No modern clothing, "
+            "architecture, roads, vehicles, or technology. Never describe "
+            "Jesus's physical appearance; identify him by name, actions, "
+            "and place in the scene.\n\n"
+            "Write a concise prompt for one continuous short shot. Identify "
+            "the main subject, action, setting, atmosphere, and suitable "
+            "camera framing. Begin exactly with 'Style: realistic.' "
+            "Do not write narration, a stock-footage search query, or an "
+            "explanation.\n\n"
             "VISUAL STYLE\n"
             + creative_directions
-            + "\n\n"
-            "CHANNEL VISUAL RULES\n"
+            + "\n\nCHANNEL VISUAL RULES\n"
             + visual_rules
-            + "\n\n"
-            "FINAL OUTPUT\n"
-            "Return exactly ONE object with two fields, and nothing "
-            "else:\n"
-            "- \"search_query\": one distinct, complete SnapGenAI "
-            "visual prompt for THIS sentence only, including its "
-            "specific scene, subject, action, setting, atmosphere, and "
-            "camera framing.\n"
-            "- \"visual_direction\": that same shot in one concise "
-            "sentence.\n"
+            + "\n\nRETURN exactly one JSON object with:\n"
+            "- search_query: the complete standalone SnapGenAI visual prompt.\n"
+            "- visual_direction: one concise sentence describing the same shot.\n"
         )
 
-        # A re-roll carries the checker's rejection forward, so the
-        # second attempt fixes the specific problem instead of
-        # resampling the same mistake.
         if feedback:
             prompt += (
-                "\n\nYOUR PREVIOUS ANSWER WAS REJECTED\n"
-                "An accuracy check read your earlier visual for this "
-                "sentence and rejected it for this reason:\n"
+                "\n\nPREVIOUS VISUAL ATTEMPTS WERE REJECTED\n"
+                "Use the feedback below to correct the mismatch. Do not "
+                "repeat a rejected scene or merely reword it; choose a "
+                "clearer visual that directly represents the assigned "
+                "narration segment. Address each rejection reason.\n"
                 + feedback
-                + "\nWrite a NEW search_query that fixes exactly this "
-                "problem while still depicting only the marked "
-                "sentence. Do not repeat the rejected wording.\n"
+                + "\n"
             )
 
         return prompt
@@ -1393,184 +1004,72 @@ class ContentGenerator(
         index,
         query
     ):
-        """
-        Builds the judge prompt for ONE visual against ONE sentence.
-
-        This is the accuracy check that lets generate() reject and
-        re-roll its own output: an independent second read that gets
-        the passage, the full telling, the marked sentence with its
-        neighbours, and the query written for it, and answers one
-        structured question - aligned, yes or no, and why not. The
-        criteria are the failure modes this channel has actually hit:
-        the wrong beat in the chronology, wrong agents, invented
-        locations, contradicted conditions, invented events, named
-        people left unnamed, and prompts that cannot stand alone.
-        """
+        """Build a focused check of one visual prompt against its narration chunk."""
         channel = self.channel_config.get("channel", {})
         name = str(channel.get("name", "Hear His Voice"))
-
         segment = segments[index]
         before = (
             segments[index - 1] if index > 0
-            else "(nothing - this sentence opens the narration)"
+            else "(this is the opening segment)"
         )
         after = (
             segments[index + 1] if index + 1 < len(segments)
-            else "(nothing - this sentence closes the narration)"
+            else "(this is the final segment)"
         )
-
         full_telling = "\n".join(
-            f"{position + 1}. {text}"
-            for position, text in enumerate(segments)
+            f"{position + 1}. {part}"
+            for position, part in enumerate(segments)
         )
-
-        # Where the passage has each named character at this point in
-        # the story. The checker uses this to reject a visual that
-        # places a character where the passage doesn't have them.
-        # Computed before the return so it can be woven into the single
-        # parenthesised expression.
-        positions = _positions_at_segment(
-            str(scripture.get("text") or ""),
-            index,
-            len(segments),
-        )
-
-        if positions:
-
-            # Keep only the last position per character so the position
-            # block is unambiguous: each named person appears once with
-            # their current location, not a history of everywhere they
-            # have been. This stops a stale entry (e.g. "Jesus at the
-            # boat") from competing with the current one ("Jesus walking
-            # on the water") and letting a contradictory placement slip
-            # past the verifier.
-            current_positions = _current_positions(positions)
-
-            position_lines = "\n".join(
-                f"  - {character}: {position}"
-                for character, position in current_positions
-            )
-
-            position_block = (
-                "CHARACTER POSITIONS FROM THE PASSAGE\n"
-                "The passage places people as follows at this point "
-                "in the story. A visual that places any character "
-                "elsewhere is a location failure, even if the scene "
-                "otherwise fits the sentence:\n"
-                + position_lines
-                + "\n\n"
-            )
-
-        else:
-
-            position_block = ""
 
         return (
-            "You are the accuracy checker for \""
+            "You are the visual accuracy checker for \""
             + name
-            + "\". You read ONE visual prompt that was written for ONE "
-            "sentence of the narration, and you decide one thing: does "
-            "this visual depict exactly that sentence?\n\n"
-            "THE PASSAGE - THE AUTHORITY\n"
-            "The passage below is the exact "
-            + scripture["translation"]
-            + " text and the source of everything. The narration was "
-            "written from it and is fixed.\n\n"
+            + "\". Decide whether the proposed visual is a faithful, "
+            "recognizable illustration of the assigned narration segment.\n\n"
             "SCRIPTURE REFERENCE\n"
             + scripture["reference"]
             + " ("
             + scripture["translation"]
-            + ")\n\n"
-            "THE PASSAGE\n"
+            + ")\n\nSOURCE PASSAGE\n"
             + str(scripture.get("text") or "").strip()
-            + "\n\n"
-            "THE FULL NARRATION - CONTEXT\n"
+            + "\n\nFULL NARRATION IN ORDER - CONTEXT\n"
             + full_telling
-            + "\n\n"
-            "THIS SENTENCE - WHAT THE CLIP MUST SHOW\n"
-            f"THIS SENTENCE: {segment}\n"
-            f"  JUST BEFORE: {before}\n"
-            f"  JUST AFTER: {after}\n\n"
-            + position_block
-            + "THE VISUAL PROMPT IN QUESTION\n"
+            + "\n\nASSIGNED NARRATION SEGMENT - THE VISUAL MUST SUPPORT THIS\n"
+            + segment
+            + "\n\nIMMEDIATELY BEFORE\n"
+            + before
+            + "\nIMMEDIATELY AFTER\n"
+            + after
+            + "\n\nPROPOSED VISUAL\n"
             + str(query or "")
-            + "\n\n"
-            "JUDGE IT ON THESE POINTS ONLY\n"
-            "- Chronology: does it show THIS sentence's moment - not an "
-            "earlier beat, and not what happens later in the story?\n"
-            "- Agents: does the action THIS sentence narrates happen, "
-            "done by the people the passage has doing it? Never accept "
-            "one person's action credited to another. Other people the "
-            "passage has present in this scene may appear as "
-            "bystanders or witnesses - their presence is not a "
-            "failure, but an action given to them that this sentence "
-            "does not narrate is: showing people from the crowd "
-            "climbing into the boat while the sentence sends that "
-            "crowd away and tells only the disciples to board fails "
-            "here, even though the passage has the crowd present.\n"
-            "- Location: are the people where the passage and the "
-            "narration put them at this point? Never show a location "
-            "the narration does not put them in - no invented shore, "
-            "land, or house, and no boarding shown when the narration "
-            "has someone already aboard. Resolve every entering and "
-            "leaving against the passage's own positions: when the "
-            "narration reports a group entering a place the passage "
-            "already has them in, the ones who enter are the people "
-            "the story has outside it at this point - never the same "
-            "people shown climbing in, and never from a shore the "
-            "narration never mentions. Check every named character "
-            "against the CHARACTER POSITIONS FROM THE PASSAGE section "
-            "above: if the passage places a character at a location at "
-            "this point, the visual must show them there. Placing a "
-            "named character where the passage does not have them at "
-            "this point is a location failure, even if the scene "
-            "otherwise fits the sentence.\n"
-            "- Conditions: does it contradict a condition still in "
-            "effect - storm, night, rain, crowd, being apart? A "
-            "contradiction is a failure.\n"
-            "- Invention: does it add people, actions, objects, or "
-            "outcomes the PASSAGE does not support? Details the "
-            "passage supports even without naming them in this exact "
-            "sentence - the setting, the other people present in this "
-            "scene, the weather - are legitimate context, not "
-            "invention.\n"
-            "- Naming: is every person the passage names who appears "
-            "in the shot called by that name? A named person reduced "
-            "to an unnamed stand-in - 'a lone figure', 'a solitary "
-            "figure', or 'a distant man' where the passage has Jesus "
-            "- is a failure, even when the scene makes the identity "
-            "guessable.\n"
-            "- Character identity: is every person the passage names "
-            "who appears in the shot called by the name and the role "
-            "or title the passage gives them, identified by who they "
-            "are in this passage rather than by a familiar name alone? "
-            "Does each person keep their own distinct biblical identity, "
-            "with each character separate from the others, and only "
-            "people the passage establishes shown?\n"
-            "- Period-appropriate people: does every crowd or group of "
-            "people appear as ancient biblical-era people appropriate "
-            "to the passage - first-century Jewish people in period "
-            "clothing and appearance - matching the identity the passage "
-            "gives them?\n"
-            "- Self-containedness: does it name its people from the "
-            "passage instead of leaving an unresolved word like "
-            "'they'?\n\n"
-            "WHAT IS NOT A FAILURE\n"
-            "Do not reject for style, wording, atmosphere, camera "
-            "framing, or for carrying context the passage supports. "
-            "Reject only for one of the points above. If the visual "
-            "faithfully depicts this sentence and nothing on that "
-            "list fails, aligned must be true.\n\n"
-            "RETURN\n"
-            "Return exactly ONE object with two fields, and nothing "
-            "else:\n"
-            "- \"aligned\": true only if the visual faithfully depicts "
-            "THIS sentence on every point above; otherwise false.\n"
-            "- \"reason\": when aligned is false, one short sentence "
-            "naming exactly what is wrong with the visual; when "
-            "aligned is true, an empty string.\n"
-            "A reply that is not the JSON object above cannot be "
-            "parsed, and an unparsable reply counts as a rejection.\n"
+            + "\n\nAccept the visual when it clearly represents the central "
+            "action, event, speaker, listener, or idea in the assigned "
+            "segment and remains consistent with the passage. The segment "
+            "is a word-count chunk and may be part of a longer sentence; "
+            "use the neighbouring narration to understand it.\n\n"
+            "Reject only for a material mismatch: it depicts a different "
+            "biblical event; shows an unrelated scene; gives the central "
+            "action to the wrong person; contradicts an explicit setting, "
+            "time, or condition; substitutes a later or earlier event; or "
+            "adds an unsupported action or outcome that changes the scene.\n\n"
+            "A relevant representative or symbolic visual is acceptable "
+            "for dialogue, prophecy, quotations, travel, or abstract "
+            "statements when a literal action is not readily visible. "
+            "Do not require every person or detail from the full passage "
+            "to appear in this one clip. Do not reject simply because the "
+            "visual is not a word-for-word reenactment, or because it uses "
+            "reasonable atmosphere, framing, or background detail.\n\n"
+            "The passage and surrounding narration provide context; they "
+            "do not authorize replacing the assigned segment with another "
+            "scene. Do not infer exact character locations from sentence "
+            "counts or estimated position timelines. Only reject a location "
+            "when the proposed scene clearly contradicts what the passage "
+            "actually establishes for this moment.\n\n"
+            "RETURN exactly one JSON object:\n"
+            "- aligned: true if the visual is clearly relevant and has no "
+            "material contradiction; otherwise false.\n"
+            "- reason: if false, briefly identify the specific mismatch and "
+            "what the visual should represent instead; if true, an empty string.\n"
         )
 
 
@@ -1581,14 +1080,7 @@ class ContentGenerator(
         index,
         query
     ):
-        """
-        Returns (aligned, reason) for one visual against its sentence.
-
-        Every failure path - a transport error, a reply with no JSON,
-        a verdict that is not plainly true - returns aligned=False, so
-        the only way a visual passes is an explicit parsed verdict of
-        true. Silence or noise can never read as approval.
-        """
+        """Return the checker's explicit alignment verdict for one visual."""
         prompt = self.build_visual_verification_prompt(
             scripture,
             segments,
@@ -1597,50 +1089,36 @@ class ContentGenerator(
         )
 
         try:
-
             response = self.llm.generate(
                 prompt,
                 response_format=VISUAL_VERIFICATION_SCHEMA
             )
-
         except Exception as error:
-
-            return (
-                False,
-                f"The accuracy check itself failed: {error}"
-            )
+            raise ContentGenerationError(
+                f"Visual verification could not run: {error}"
+            ) from error
 
         try:
-
             verdict = self.parse_direction(response)
+        except ContentGenerationError as error:
+            raise ContentGenerationError(
+                "Visual verification returned no parseable verdict."
+            ) from error
 
-        except ContentGenerationError:
-
-            return (
-                False,
-                "The accuracy check returned no parseable verdict."
+        if (
+            not isinstance(verdict, dict)
+            or not isinstance(verdict.get("aligned"), bool)
+        ):
+            raise ContentGenerationError(
+                "Visual verification did not return an explicit boolean verdict."
             )
 
-        if not isinstance(verdict, dict):
-
-            return (
-                False,
-                "The accuracy check returned no parseable verdict."
-            )
-
-        if verdict.get("aligned") is True:
-
+        if verdict["aligned"]:
             return True, ""
 
-        reason = str(
-            verdict.get("reason") or ""
-        ).strip()
-
+        reason = str(verdict.get("reason") or "").strip()
         if not reason:
-            reason = (
-                "The visual does not faithfully depict the marked "
-                "sentence."
-            )
+            reason = "The visual does not clearly represent the assigned narration segment."
 
         return False, reason
 
@@ -2505,64 +1983,39 @@ class ContentGenerator(
         segments,
         narration=None
     ):
-        """
-        Returns the episode content dict.
-
-        The narration is the telling this call is handed, never this
-        call's own model output: the model here directs the visuals,
-        the title, the summary, and the mood, and nothing else.
-
-        Visuals are directed one narration segment at a time. Each
-        segment gets its own focused call - showing the full passage,
-        the full narration, and that segment's immediate neighbours -
-        so every prompt depicts exactly its own moment instead of the
-        model collapsing the whole episode into a few repeated
-        establishing shots. Every finished visual is then checked
-        against its own segment by a separate verification call; a
-        rejected visual is re-rolled with the checker's reason as
-        feedback and checked again, up to verification_attempts
-        times - when the cap is hit the last draft ships (set
-        content_generation.verify_visuals to false to skip the check).
-        A final separate call writes the title, summary, and mood.
-        assemble_content() then pairs each collected visual with its
-        own segment, in order.
-
-        Segmentation is already FINAL when this method is called: the
-        segments list is read only. A reroll repairs the visual prompt
-        for its segment and never edits the narration, the segment
-        text, or the grouping - so verification can only change what
-        the viewer sees, never what is spoken or how it is cut.
-        """
+        """Generate and verify one visual per fixed narration segment."""
         self.log(
-            f"Generating {len(segments)} visuals, one call per "
-            "segment..."
+            f"Generating {len(segments)} visuals, one per narration segment..."
         )
 
         verify = bool(
             self.generation_config.get("verify_visuals", True)
         )
-        verification_attempts = max(
-            1,
-            int(
-                self.generation_config.get(
-                    "verification_attempts",
-                    3,
-                )
-            ),
-        )
 
         visuals = []
-        for index in range(len(segments)):
-            feedback = None
-            parsed = {}
+        for index, segment in enumerate(segments):
+            rejected_attempts = []
 
-            for _ in range(verification_attempts):
+            while True:
+                feedback = ""
+                if rejected_attempts:
+                    unique_reasons = list(dict.fromkeys(
+                        item["reason"] for item in rejected_attempts
+                    ))
+                    feedback = (
+                        "Rejection reasons from previous attempts:\n"
+                        + "\n".join(
+                            f"- {reason}" for reason in unique_reasons
+                        )
+                        + "\n\nMost recent rejected visual:\n"
+                        + rejected_attempts[-1]["visual"]
+                    )
 
                 prompt = self.build_segment_prompt(
                     scripture,
                     segments,
                     index,
-                    feedback=feedback
+                    feedback=feedback or None,
                 )
 
                 response = self.llm.generate(
@@ -2570,37 +2023,58 @@ class ContentGenerator(
                     response_format=VISUAL_SCHEMA
                 )
 
-                parsed = self.parse_direction(response)
+                try:
+                    parsed = self.parse_direction(response)
+                except ContentGenerationError as error:
+                    reason = f"The visual response was not valid JSON: {error}"
+                    rejected_attempts.append({
+                        "visual": "(unparseable response)",
+                        "reason": reason,
+                    })
+                    self.log(
+                        f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
+                    )
+                    continue
+
                 if not isinstance(parsed, dict):
                     parsed = {}
 
-                if not verify:
-                    break
+                query = str(parsed.get("search_query") or "").strip()
+                if not query:
+                    reason = "The visual prompt was empty. Return a complete, specific scene for the assigned narration segment."
+                    rejected_attempts.append({
+                        "visual": "(empty visual prompt)",
+                        "reason": reason,
+                    })
+                    self.log(
+                        f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
+                    )
+                    continue
 
-                aligned, reason = self.verify_visual(
-                    scripture,
-                    segments,
-                    index,
-                    str(parsed.get("search_query", ""))
-                )
+                if verify:
+                    aligned, reason = self.verify_visual(
+                        scripture,
+                        segments,
+                        index,
+                        query,
+                    )
+                    if not aligned:
+                        rejected_attempts.append({
+                            "visual": query,
+                            "reason": reason,
+                        })
+                        self.log(
+                            f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
+                        )
+                        continue
 
-                if aligned:
-                    break
-
+                visuals.append(parsed)
                 self.log(
-                    f"Sentence {index + 1}: rejected ({reason}) - "
-                    "re-rolling..."
+                    f"Segment {index + 1}: visual approved."
+                    if verify else
+                    f"Segment {index + 1}: visual generated (verification disabled)."
                 )
-                feedback = reason
-            else:
-
-                self.log(
-                    f"Sentence {index + 1}: visual verification never "
-                    f"passed after {verification_attempts} attempts; "
-                    "shipping the last draft."
-                )
-
-            visuals.append(parsed)
+                break
 
         self.log("Generating metadata (title, summary, mood)...")
 
