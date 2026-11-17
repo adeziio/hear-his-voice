@@ -348,13 +348,13 @@ class ProductionPipeline:
             "Composing the final video..."
         )
 
-        # Compute per-sentence durations from the word timings so the
-        # composer can align visual segments with what the narration is
-        # actually saying. Each sentence gets a segment whose length
-        # matches its spoken duration, and clips from that sentence's
-        # visual group are combined (long sentence) or cut (short
-        # sentence) to fit — keeping visuals and narration in sync.
-        sentence_durations = self._compute_sentence_durations(
+        # Compute the actual narration window (start/end seconds) of each
+        # sentence from the word timings so the composer can align visual
+        # segments with what the narration is actually saying. Each visual
+        # uses its sentence's actual audio start and end times - nothing is
+        # stretched, scaled, or redistributed across the timeline - keeping
+        # visuals and narration in sync.
+        sentence_segments = self._compute_sentence_segments(
             words, content
         )
 
@@ -372,7 +372,7 @@ class ProductionPipeline:
                     )
                     if visuals
                     else None,
-                    sentence_durations=sentence_durations,
+                    sentence_segments=sentence_segments,
                 )
             )
 
@@ -686,12 +686,20 @@ class ProductionPipeline:
 
             pass
 
-    def _compute_sentence_durations(self, words, content):
+    def _compute_sentence_segments(self, words, content):
         """
-        Computes the spoken duration of each narration sentence by
+        Computes the spoken window of each narration sentence by
         partitioning word timings based on each sentence's word count.
-        Returns a list of durations (seconds) in sentence order.
-        Falls back to even distribution when mapping cannot be done.
+
+        Returns a list of dicts in sentence order, each with:
+            "start"    - seconds, first word start of the sentence
+            "end"      - seconds, last word end of the sentence
+            "duration" - end - start, in seconds
+
+        The pairing of each visual to the narration sentence it depicts
+        (the visual's "sentence" field) is the single source of truth;
+        there is no separate top-level narration_sentences field.
+        Falls back to even distribution when timings cannot be mapped.
         """
         if not words:
             return []
@@ -721,31 +729,72 @@ class ProductionPipeline:
 
         # Partition the word timings by sentence. Words are in order, so
         # the first N words belong to sentence 0, the next M to sentence 1,
-        # etc. Sentence duration = last word end - first word start.
-        durations = []
+        # etc. Each segment's window is first word start to last word end.
+        segments = []
         word_idx = 0
         for count in sentence_word_counts:
             if count <= 0 or word_idx >= len(words):
-                durations.append(0.0)
+                start_time = (
+                    float(words[word_idx].get("start", 0.0))
+                    if word_idx < len(words)
+                    else total_duration
+                )
+                segments.append(
+                    {
+                        "start": start_time,
+                        "end": start_time,
+                        "duration": 0.0,
+                    }
+                )
                 continue
             start_time = float(words[word_idx].get("start", 0.0))
             end_idx = min(word_idx + count, len(words)) - 1
             end_time = float(words[end_idx].get("end", 0.0))
-            durations.append(max(0.0, end_time - start_time))
+            segments.append(
+                {
+                    "start": start_time,
+                    "end": end_time,
+                    "duration": max(0.0, end_time - start_time),
+                }
+            )
             word_idx += count
 
         # Assign any remaining words to the last sentence.
-        if word_idx < len(words) and durations:
+        if word_idx < len(words) and segments:
             extra_end = float(words[-1].get("end", 0.0))
-            last_start = float(words[word_idx].get("start", 0.0)) if word_idx < len(words) else 0.0
-            durations[-1] = max(durations[-1], extra_end - last_start)
+            last_start = float(
+                words[word_idx].get("start", 0.0)
+            )
+            segments[-1]["end"] = max(
+                segments[-1]["end"],
+                extra_end,
+            )
+            segments[-1]["duration"] = max(
+                segments[-1]["duration"],
+                extra_end - last_start,
+            )
 
-        # If all zero, fall back to even distribution.
-        if not durations or sum(durations) <= 0:
+        # If all zero, fall back to even distribution across the
+        # narration duration.
+        if (
+            not segments
+            or sum(seg.get("duration", 0.0) for seg in segments) <= 0
+        ):
             per_sentence = total_duration / len(narration_sentences)
-            return [per_sentence] * len(narration_sentences)
+            segments = []
+            cursor = 0.0
+            for _ in narration_sentences:
+                end = cursor + per_sentence
+                segments.append(
+                    {
+                        "start": cursor,
+                        "end": end,
+                        "duration": per_sentence,
+                    }
+                )
+                cursor = end
 
-        return durations
+        return segments
 
     def _provider_setting(
         self,

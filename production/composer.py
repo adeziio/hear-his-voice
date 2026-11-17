@@ -111,7 +111,7 @@ class Composer:
         footage_groups,
         visuals=None,
         segment_count=None,
-        sentence_durations=None,
+        sentence_segments=None,
     ):
 
         """
@@ -129,12 +129,15 @@ class Composer:
         segment_count  : how many visual segments the timeline should be split
                         into (defaults to len(visuals), then to the total
                         number of downloaded clips).
-        sentence_durations : optional list of per-sentence durations (seconds)
-                        in sentence order. When provided, each visual segment
-                        matches its sentence's actual spoken duration so the
-                        visuals change in sync with the narration. Long
-                        sentences combine multiple clips; short sentences cut
-                            clips to fit.
+        sentence_segments : optional list of per-sentence narration windows
+                        in sentence order. Each entry may be a mapping with
+                        "start" and "end" seconds (preferred) or a plain
+                        duration. When provided, each visual segment uses its
+                        sentence's actual audio start and end times so the
+                        visuals change in sync with the narration. Segments
+                        are never stretched or scaled to fill the total
+                        video duration. Long sentences combine multiple
+                        clips; short sentences cut clips to fit.
         """
 
         # Flatten all available clips as a fallback pool.
@@ -207,7 +210,7 @@ class Composer:
                     height,
                     segment_count,
                     visuals=visuals,
-                    sentence_durations=sentence_durations,
+                    sentence_segments=sentence_segments,
                 )
             )
 
@@ -308,7 +311,7 @@ class Composer:
         height,
         segment_count,
         visuals=None,
-        sentence_durations=None,
+        sentence_segments=None,
     ):
 
         # footage_groups: list of lists where footage_groups[i] holds
@@ -353,36 +356,61 @@ class Composer:
         if not fallback_pool:
             fallback_pool = [None]
 
-        # When sentence_durations is provided, build segment boundaries
+        # When sentence_segments is provided, build segment boundaries
         # that match the actual narration pacing: each sentence gets a
-        # segment whose duration equals its spoken length. This keeps
-        # visuals in sync with what is being said. Long sentences
-        # combine multiple clips from their group; short sentences cut
-        # a clip to fit.
-        use_sentence_timing = (
-            sentence_durations
-            and len(sentence_durations) == num_groups
-            and sum(sentence_durations) > 0
-        )
+        # segment whose window equals its spoken start and end times.
+        # This keeps visuals in sync with what is being said. Long
+        # sentences combine multiple clips from their group; short
+        # sentences cut clips to fit.
+        #
+        # Segments are never scaled or redistributed to fill
+        # video_duration: every visual uses exactly its sentence's
+        # actual audio start and end times, so earlier clips never
+        # consume time belonging to later segments or to the tail.
+        sentence_windows = None
+        if (
+            sentence_segments
+            and len(sentence_segments) == num_groups
+        ):
+            starts = []
+            ends = []
+            cursor = 0.0
+            for entry in sentence_segments:
+                if (
+                    isinstance(entry, dict)
+                    and "start" in entry
+                    and "end" in entry
+                ):
+                    start = float(entry.get("start") or 0.0)
+                    end = float(entry.get("end") or 0.0)
+                else:
+                    # Legacy plain duration: no timing information is
+                    # available, so place it right after the previous
+                    # segment without any scaling.
+                    dur = (
+                        float(entry)
+                        if not isinstance(entry, dict)
+                        else float(entry.get("duration", 0.0) or 0.0)
+                    )
+                    start = cursor
+                    end = cursor + dur
+                if end < start:
+                    end = start
+                starts.append(start)
+                ends.append(end)
+                cursor = end
+            if cursor > 0:
+                sentence_windows = (starts, ends)
 
-        if use_sentence_timing:
-            # Normalise sentence durations to fit video_duration.
-            total_sentence_time = sum(sentence_durations)
-            scale = video_duration / total_sentence_time if total_sentence_time > 0 else 1.0
-            segment_starts = [0.0]
-            scaled_durations = []
-            for dur in sentence_durations:
-                scaled = dur * scale
-                scaled_durations.append(scaled)
-                segment_starts.append(segment_starts[-1] + scaled)
-            # Use per-sentence segments instead of the even-split count.
-            effective_segment_count = len(scaled_durations)
+        if sentence_windows is not None:
+            segment_starts, segment_ends = sentence_windows
+            effective_segment_count = len(segment_starts)
             segment_duration = None  # not used in sentence-timing mode
         else:
             segment_duration = video_duration / segment_count
             effective_segment_count = segment_count
-            scaled_durations = None
             segment_starts = None
+            segment_ends = None
 
         # Track per-group clip consumption so each query's clips are
         # consumed in order, independently instead of one global index
@@ -395,12 +423,41 @@ class Composer:
 
         for index in range(effective_segment_count):
 
-            if use_sentence_timing:
-                start = segment_starts[index]
-                needed = min(
-                    scaled_durations[index],
-                    video_duration - start
-                )
+            if segment_starts is not None:
+                # Absolute narration window for this sentence: no
+                # accumulation, no scaling to video_duration.
+                #
+                # The first visual starts at t=0 so the video never
+                # opens on a black frame. The last visual is extended
+                # through video_duration (narration + tail) so it
+                # remains visible during the fade-out instead of
+                # cutting to black.
+                if index == 0:
+
+                    start = 0.0
+                else:
+
+                    start = segment_starts[index]
+
+                if index == effective_segment_count - 1:
+
+                    # Extend the final visual through the tail so it
+                    # covers the fade-out period rather than ending at
+                    # the end of the final narration segment.
+                    needed = video_duration - start
+                else:
+
+                    needed = segment_ends[index] - start
+
+                if needed <= 0:
+
+                    continue  # no time allotted to this segment
+                if start >= video_duration:
+
+                    continue
+                if index != effective_segment_count - 1 and segment_ends[index] > video_duration:
+
+                    needed = video_duration - start
             else:
                 start = index * segment_duration
                 needed = min(
@@ -408,9 +465,9 @@ class Composer:
                     video_duration - start
                 )
 
-            if needed <= 0:
+                if needed <= 0:
 
-                break
+                    break
 
             group_idx = index % num_groups
             pool = footage_groups[group_idx]
@@ -480,8 +537,6 @@ class Composer:
                 )
 
                 raise
-
-            start += needed
 
         if not frame_clips:
 
