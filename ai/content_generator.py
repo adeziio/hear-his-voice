@@ -1,3 +1,4 @@
+import difflib
 import json
 import re
 
@@ -360,6 +361,294 @@ def source_names(text):
             names.add(key)
 
     return names
+
+
+# These checks are deliberately deterministic. The language-model verifier
+# remains responsible for biblical meaning and completeness, but it must not
+# be the only gate for errors that code can identify exactly.
+_NON_PERSON_SOURCE_NAMES = frozenset({
+    "behold", "christ", "come", "god", "holy", "israel", "lamb",
+    "messiah", "rabbi", "son", "spirit", "teacher",
+})
+
+_SPEECH_PRONOUN_RE = re.compile(
+    r"\b(?P<subject>he|she)\s+"
+    r"(?:(?:quietly|softly|solemnly|immediately|then|again)\s+)?"
+    r"(?P<verb>said|asked|replied|answered|declared|testified|spoke|"
+    r"called|cried|shouted|whispered|told)\b",
+    re.IGNORECASE,
+)
+
+_VISUAL_TEXT_STOP_WORDS = frozenset({
+    "style", "realistic", "the", "and", "but", "with", "from", "into",
+    "onto", "over", "under", "near", "beside", "while", "where", "when",
+    "his", "her", "their", "they", "them", "him", "she", "he", "it",
+    "this", "that", "these", "those", "was", "were", "are", "is", "be",
+    "been", "being", "has", "have", "had", "for", "one", "two", "both",
+    "simple", "modest", "ancient", "first", "century", "biblical", "period",
+    "setting", "scene", "shot", "camera", "framing", "light", "soft", "warm",
+    "golden", "morning", "early", "dawn", "afternoon", "quiet", "calm",
+    "gentle", "reverent", "atmosphere", "shadow", "shadows", "around",
+})
+
+
+def _scan_quoted_spans(text):
+    """Return nested quoted spans and report genuinely unbalanced quotes.
+
+    Quote style is intentionally flexible: straight, curly, single, and
+    double marks are accepted at any nesting level. The checker enforces
+    balanced, correctly paired marks, not typographic preferences. Apostrophes
+    inside contractions and possessives are treated as ordinary characters.
+    """
+    value = str(text or "")
+    stack = []
+    spans = []
+    problems = []
+
+    def add_closed_span(item, end_index):
+        quoted = value[item["start"]:end_index].strip()
+        if quoted:
+            spans.append((quoted, item["start"], end_index))
+
+    for index, char in enumerate(value):
+        previous = value[index - 1] if index else ""
+        following = value[index + 1] if index + 1 < len(value) else ""
+
+        # Apostrophes inside words (didn't, Jesus's) are not delimiters.
+        if char in ("'", "’") and previous.isalnum() and following.isalnum():
+            continue
+
+        if char in ("“", "‘"):
+            stack.append({
+                "opening": char,
+                "closing": {"“": "”", "‘": "’"}[char],
+                "start": index + 1,
+                "position": index,
+            })
+            continue
+
+        if char == '"':
+            if stack and stack[-1]["closing"] == '"':
+                add_closed_span(stack.pop(), index)
+            else:
+                stack.append({
+                    "opening": char,
+                    "closing": char,
+                    "start": index + 1,
+                    "position": index,
+                })
+            continue
+
+        if char == "'":
+            if stack and stack[-1]["closing"] == "'":
+                add_closed_span(stack.pop(), index)
+            elif (not previous or previous.isspace() or previous in "([{—–:;,") and following and not following.isspace():
+                stack.append({
+                    "opening": char,
+                    "closing": char,
+                    "start": index + 1,
+                    "position": index,
+                })
+            else:
+                problems.append(
+                    f"Unmatched or mis-nested apostrophe quotation mark at character {index}."
+                )
+            continue
+
+        if char in ("”", "’"):
+            if stack and stack[-1]["closing"] == char:
+                add_closed_span(stack.pop(), index)
+            else:
+                problems.append(
+                    f"Unmatched or mis-nested closing quotation mark {char!r} at character {index}."
+                )
+
+    for item in stack:
+        problems.append(
+            f"Unclosed quotation mark {item['opening']!r} at character {item['position']}."
+        )
+
+    spans.sort(key=lambda item: (item[1], -item[2]))
+    return spans, problems
+
+
+def _closest_source_quote_excerpt(source_text, quoted_words):
+    """Return the closest same-length source word window for actionable feedback."""
+    source = str(source_text or "")
+    token_matches = list(re.finditer(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*", source))
+    flat_words = []
+    flat_to_token = []
+    for token_index, match in enumerate(token_matches):
+        normalized = _normalize_words(match.group(0))
+        for word in normalized:
+            flat_words.append(word)
+            flat_to_token.append(token_index)
+
+    width = len(quoted_words)
+    if not width or len(flat_words) < width:
+        return ""
+
+    best_start = None
+    best_score = -1.0
+    for start in range(len(flat_words) - width + 1):
+        window = flat_words[start:start + width]
+        score = difflib.SequenceMatcher(
+            None, quoted_words, window, autojunk=False
+        ).ratio()
+        if score > best_score:
+            best_score = score
+            best_start = start
+            if score == 1.0:
+                break
+
+    if best_start is None or best_score < 0.55:
+        return ""
+
+    first_token = flat_to_token[best_start]
+    last_token = flat_to_token[best_start + width - 1]
+    excerpt = source[
+        token_matches[first_token].start():token_matches[last_token].end()
+    ]
+    return " ".join(excerpt.split())
+
+
+def narration_quote_problems(source_text, narration):
+    """Reject unbalanced quotes and quoted words that are not source-exact.
+
+    WEBC translator explanations in parentheses are editorial glosses. The
+    source is checked both as printed and with those glosses omitted, allowing
+    narration either to retain the exact parenthetical text or keep it outside
+    the spoken quotation. Actual quoted words must still match consecutively.
+    """
+    spans, problems = _scan_quoted_spans(narration)
+    source = str(source_text or "")
+    source_variants = [
+        _normalize_words(source),
+        _normalize_words(re.sub(
+            r"\(\s*which is\b[^)]*\)",
+            " ",
+            source,
+            flags=re.IGNORECASE,
+        )),
+    ]
+
+    for quoted_text, _start, _end in spans:
+        quoted_words = _normalize_words(quoted_text)
+        if not quoted_words:
+            continue
+
+        width = len(quoted_words)
+        found = any(
+            any(
+                words[index:index + width] == quoted_words
+                for index in range(len(words) - width + 1)
+            )
+            for words in source_variants
+        )
+        if not found:
+            excerpt = " ".join(quoted_text.split())
+            if len(excerpt) > 120:
+                excerpt = excerpt[:117] + "..."
+            source_excerpt = _closest_source_quote_excerpt(source, quoted_words)
+            detail = (
+                f' Direct source wording nearby: "{source_excerpt}".'
+                if source_excerpt else ""
+            )
+            problems.append(
+                f'Direct quotation "{excerpt}" does not match consecutive source words exactly.'
+                f'{detail} Restore the exact WEBC wording; do not paraphrase words inside quotation marks.'
+            )
+
+    return problems
+
+
+def narration_speaker_problems(source_text, narration):
+    """Reject speech attributed with he/she when two named people are local candidates.
+
+    This intentionally conservative rule requires the narrator to name the
+    speaker when two source-named people occur across the current and previous
+    sentence. It avoids guessing which person a pronoun refers to.
+    """
+    person_names = (
+        source_names(source_text)
+        - SENTENCE_START_WORDS
+        - _NON_PERSON_SOURCE_NAMES
+    )
+    if len(person_names) < 2:
+        return []
+
+    spans, _structure_problems = _scan_quoted_spans(narration)
+    problems = []
+    value = str(narration or "")
+
+    for quoted_text, quote_start, _quote_end in spans:
+        prefix = value[:quote_start]
+        sentence_parts = re.split(r"[.!?][\"”’']?\s+", prefix)
+        local_context = " ".join(sentence_parts[-2:])
+        matches = list(_SPEECH_PRONOUN_RE.finditer(local_context))
+        if not matches:
+            continue
+
+        match = matches[-1]
+        # The speaker cue must be close to the quotation it introduces.
+        if match.end() < max(0, len(local_context) - 120):
+            continue
+
+        candidate_names = {
+            name for name in person_names
+            if re.search(rf"\b{re.escape(name)}\b", local_context[:match.start()], re.IGNORECASE)
+        }
+        if len(candidate_names) >= 2:
+            problems.append(
+                f'Potentially ambiguous speaker: "{match.group("subject")} {match.group("verb")}" '
+                f'before "{quoted_text[:70]}" follows references to '
+                f'{", ".join(sorted(candidate_names))}. Name the speaker explicitly, '
+                "following the source passage."
+            )
+
+    return problems
+
+
+def _visual_similarity_tokens(value):
+    return [
+        token for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+        if len(token) > 2 and token not in _VISUAL_TEXT_STOP_WORDS
+    ]
+
+
+def visual_repetition_problem(query, prior_visuals):
+    """Reject an identical or near-identical scene already used in this episode."""
+    current_tokens = _visual_similarity_tokens(query)
+    if len(current_tokens) < 7:
+        return None
+
+    current_set = set(current_tokens)
+    for index, item in enumerate(prior_visuals or []):
+        if not isinstance(item, dict):
+            continue
+        previous = str(item.get("search_query") or "").strip()
+        previous_tokens = _visual_similarity_tokens(previous)
+        if len(previous_tokens) < 7:
+            continue
+
+        previous_set = set(previous_tokens)
+        union = current_set | previous_set
+        jaccard = len(current_set & previous_set) / max(1, len(union))
+        sequence_ratio = difflib.SequenceMatcher(
+            None,
+            current_tokens,
+            previous_tokens,
+            autojunk=False,
+        ).ratio()
+
+        if sequence_ratio >= 0.84 and jaccard >= 0.76:
+            return (
+                f"This scene substantially repeats the scene already approved for segment {index + 1}. "
+                "Create a genuinely different shot showing the assigned segment's own action or story beat. "
+                "Keep character appearance consistent, but do not reuse the same action, composition, and scene."
+            )
+
+    return None
 
 
 def verbatim_sentence_overlap(source_text, narration):
@@ -874,7 +1163,8 @@ class ContentGenerator(
         scripture,
         segments,
         index,
-        feedback=None
+        feedback=None,
+        prior_visuals=None
     ):
         """Build one self-contained visual prompt for a narration word chunk."""
         channel = self.channel_config.get("channel", {})
@@ -900,6 +1190,11 @@ class ContentGenerator(
         full_telling = "\n".join(
             f"{position + 1}. {part}"
             for position, part in enumerate(segments)
+        )
+        prior_visual_context = "\n".join(
+            f"- Segment {position + 1}: {str(item.get('search_query') or '').strip()}"
+            for position, item in enumerate(prior_visuals or [])
+            if isinstance(item, dict) and str(item.get("search_query") or "").strip()
         )
 
         prompt = (
@@ -927,6 +1222,12 @@ class ContentGenerator(
             + before
             + "\nIMMEDIATELY AFTER\n"
             + after
+            + ("\n\nPREVIOUSLY APPROVED VISUALS - CHARACTER CONTINUITY ONLY\n"
+               "Reuse the same established character appearance and clothing "
+               "for recurring people. These earlier prompts are references "
+               "for character consistency, not instructions to repeat their "
+               "actions or scenes:\n" + prior_visual_context
+               if prior_visual_context else "")
             + "\n\n"
             "Create one clear, self-contained visual scene that best "
             "illustrates the main event or moment expressed by the "
@@ -943,14 +1244,17 @@ class ContentGenerator(
             "Do not show a later or earlier event instead of the moment "
             "being narrated.\n\n"
             "Make the scene concrete and recognizable: show the relevant "
-            "person or people performing the narrated action, or show a "
-            "closely related visual representation when the segment is "
-            "mainly dialogue, a quotation, a prophecy, or an abstract "
-            "statement. A relevant speaker, listener, scroll, or named "
-            "place may represent such a moment. Do not use generic scenery "
-            "or an unrelated biblical scene as a substitute. The clip does "
-            "not need to illustrate every word literally, but its connection "
-            "to this segment must be clear.\n\n"
+            "person or people performing the narrated action. First identify "
+            "whether the assigned segment describes a physical event or action "
+            "that can be shown. When it does, depict that event directly, with "
+            "the correct person and recipient or target; do not substitute a "
+            "shot of someone merely talking about the event, a generic "
+            "landscape, or a reaction shot. Use a speaker, listener, or "
+            "symbolic representation only when the segment is primarily "
+            "dialogue or an abstract statement with no concrete action to show. "
+            "Do not use unrelated biblical scenes as substitutes. The clip "
+            "does not need to illustrate every word literally, but its "
+            "connection to this segment must be clear.\n\n"
             "Only include characters who belong in this particular moment. "
             "Name the relevant biblical characters explicitly, using their "
             "full name and title when the passage establishes one. Do not "
@@ -961,12 +1265,13 @@ class ContentGenerator(
             "CHARACTER APPEARANCE AND CONTINUITY\n"
             "When a named biblical character is central to the scene, "
             "describe their recognizable appearance and clothing using "
-            "details established in Scripture, including relevant details "
-            "from elsewhere in Scripture when appropriate. Keep their "
-            "appearance consistent across scenes. Avoid generic descriptions "
-            "that make an identifiable character look anonymous. Do not "
-            "invent physical features or clothing that Scripture does "
-            "not establish.\n\n"
+            "distinctive details established in Scripture, including relevant "
+            "details from elsewhere in Scripture when appropriate. Prefer a "
+            "distinctive scriptural garment or identifying detail over generic "
+            "robes, tunics, cloaks, or head coverings when Scripture establishes "
+            "something more specific. Keep the same character's description "
+            "consistent across scenes. Do not invent physical features or "
+            "clothing that Scripture does not establish.\n\n"
             "Keep the setting and actions consistent with what the passage "
             "establishes. Do not invent a specific location, movement, "
             "interaction, or outcome that changes the meaning of the scene. "
@@ -1011,7 +1316,8 @@ class ContentGenerator(
         scripture,
         segments,
         index,
-        query
+        query,
+        prior_visuals=None
     ):
         """Build a focused check of one visual prompt against its narration chunk."""
         channel = self.channel_config.get("channel", {})
@@ -1028,6 +1334,11 @@ class ContentGenerator(
         full_telling = "\n".join(
             f"{position + 1}. {part}"
             for position, part in enumerate(segments)
+        )
+        prior_visual_context = "\n".join(
+            f"- Segment {position + 1}: {str(item.get('search_query') or '').strip()}"
+            for position, item in enumerate(prior_visuals or [])
+            if isinstance(item, dict) and str(item.get("search_query") or "").strip()
         )
 
         return (
@@ -1051,16 +1362,37 @@ class ContentGenerator(
             + after
             + "\n\nPROPOSED VISUAL\n"
             + str(query or "")
+            + ("\n\nPREVIOUSLY APPROVED VISUALS - SCENE DIVERSITY AND CHARACTER CONTINUITY\n"
+               "Compare recurring characters' appearance and clothing with "
+               "these earlier prompts. Also compare the central action and shot: "
+               "reject an identical or near-identical scene or a repeated action "
+               "when this segment has a different story beat. The same character "
+               "or setting may recur when the action genuinely changes.\n"
+               + prior_visual_context
+               if prior_visual_context else "")
             + "\n\nAccept the visual when it clearly represents the central "
             "action, event, speaker, listener, or idea in the assigned "
             "segment and remains consistent with the passage. The segment "
             "is a word-count chunk and may be part of a longer sentence; "
             "use the neighbouring narration to understand it.\n\n"
-            "Reject only for a material mismatch: it depicts a different "
-            "biblical event; shows an unrelated scene; gives the central "
-            "action to the wrong person; contradicts an explicit setting, "
-            "time, or condition; substitutes a later or earlier event; or "
-            "adds an unsupported action or outcome that changes the scene.\n\n"
+            "Reject for a material mismatch: it depicts a different biblical "
+            "event; shows an unrelated scene; gives the central action, speech, "
+            "or outcome to the wrong person; shows the wrong recipient or target; "
+            "contradicts an explicit setting, time, or condition; substitutes a "
+            "later or earlier event; or adds an unsupported action or outcome "
+            "that changes the scene.\n"
+            "For spoken words, verify the speaker against the source passage's "
+            "grammar, not merely the nearest person named in the sentence. "
+            "For a concrete event, the correct actor and target must both be "
+            "visible in the proposed scene when they are identifiable from the text.\n"
+            "CONCRETE-ACTION CHECK\n"
+            "Identify the main physical action or event in the assigned "
+            "segment. If the segment describes an event that can be visibly "
+            "depicted, the proposed visual must show that event and its correct "
+            "subject and target. A scene of someone speaking about the event "
+            "is not aligned when the event itself is visually depictable. Use "
+            "a speaker-focused or symbolic scene only when the segment has no "
+            "concrete physical action to show.\n\n"
             "CHARACTER DEPICTION CHECK\n"
             "When a named character is central to the visual, check whether "
             "their appearance and clothing are described clearly enough to "
@@ -1072,11 +1404,12 @@ class ContentGenerator(
             "variations.\n\n"
             "A relevant representative or symbolic visual is acceptable "
             "for dialogue, prophecy, quotations, travel, or abstract "
-            "statements when a literal action is not readily visible. "
-            "Do not require every person or detail from the full passage "
-            "to appear in this one clip. Do not reject simply because the "
-            "visual is not a word-for-word reenactment, or because it uses "
-            "reasonable atmosphere, framing, or background detail.\n\n"
+            "statements only when the assigned segment has no concrete "
+            "physical action that can be shown. Do not require every person "
+            "or detail from the full passage to appear in this one clip. Do "
+            "not reject simply because the visual is not a word-for-word "
+            "reenactment, or because it uses reasonable atmosphere, framing, "
+            "or background detail.\n\n"
             "The passage and surrounding narration provide context; they "
             "do not authorize replacing the assigned segment with another "
             "scene. Do not infer exact character locations from sentence "
@@ -1096,14 +1429,16 @@ class ContentGenerator(
         scripture,
         segments,
         index,
-        query
+        query,
+        prior_visuals=None
     ):
         """Return the checker's explicit alignment verdict for one visual."""
         prompt = self.build_visual_verification_prompt(
             scripture,
             segments,
             index,
-            query
+            query,
+            prior_visuals=prior_visuals
         )
 
         try:
@@ -1118,18 +1453,14 @@ class ContentGenerator(
 
         try:
             verdict = self.parse_direction(response)
-        except ContentGenerationError as error:
-            raise ContentGenerationError(
-                "Visual verification returned no parseable verdict."
-            ) from error
+        except ContentGenerationError:
+            return False, "Visual verification returned no parseable verdict; generate and verify a new prompt."
 
         if (
             not isinstance(verdict, dict)
             or not isinstance(verdict.get("aligned"), bool)
         ):
-            raise ContentGenerationError(
-                "Visual verification did not return an explicit boolean verdict."
-            )
+            return False, "Visual verification did not return an explicit boolean verdict; generate and verify a new prompt."
 
         if verdict["aligned"]:
             return True, ""
@@ -1595,12 +1926,23 @@ class ContentGenerator(
             "instead of being trimmed away. Keep the passage's own "
             "agents: whoever the passage says does an action stays the "
             "doer of it - never hand the action to another character "
-            "because that order of events seems tidier. "
+            "because that order of events seems tidier. Make the speaker "
+            "and actor explicit whenever a pronoun could refer to more "
+            "than one person. Account for the important claims and events "
+            "from the opening of the passage through its ending; do not "
+            "skip an opening statement, identity claim, or stated purpose "
+            "just to begin with a later or more familiar event. "
             "The result must be a purposeful hybrid, "
             "not a complete read-through and not a paraphrase of every line; "
             "your job is not to quote it back wholesale.\n"
             "When you use a direct quote, copy the complete relevant saying "
-            "exactly from source_text. "
+            "exactly from source_text. Never omit, replace, add, or paraphrase "
+            "any word inside quotation marks. Keep quotation marks balanced, and "
+            "keep WEBC translator explanations in parentheses outside spoken "
+            "quotations. Do not expand contractions or normalize source wording. "
+            "Preserve contractions, spelling, and every source word exactly; for "
+            "example, do not expand a contraction such as 'didn’t' into 'did not'. "
+            "If you cannot reproduce a saying exactly, narrate it outside quotation marks. "
             "Never invent, modernize, combine, or alter Scripture wording. "
             "Do not return the entire passage by default: select quotations "
             "for their importance and surround them with faithful original "
@@ -1731,14 +2073,27 @@ class ContentGenerator(
             "another answering, and the action that follows depends on "
             "it, does the narration keep both sides? An answer that "
             "erases its question is a failure.\n"
+            "- Coverage from beginning to end: make an internal ordered "
+            "inventory of the passage's material events, claims, testimony, "
+            "identities, relationships, and stated purposes. Check the opening, "
+            "middle, and ending separately. A missing opening claim or stated "
+            "purpose is a failure even when the later narration is accurate. "
+            "Do not require repetitive or minor incidental wording, but do "
+            "require every defining claim, event, and causal/purpose detail.\n"
             "- Events and order: are the passage's events present and "
-            "in the passage's order? Anything the passage states but "
-            "the narration drops, and anything the narration has that "
+            "in the passage's order? Anything material the passage states "
+            "but the narration drops, and anything the narration has that "
             "the passage never states - invented dialogue, motives, "
             "feelings, events - is a failure.\n"
-            "- Quotations: is every verbatim quotation a complete, "
-            "faithful saying from the passage, attributed to the "
-            "passage's own speaker?\n"
+            "- Speaker attribution: is it unmistakably clear who speaks, "
+            "looks, asks, answers, and acts? Reject a pronoun when it could "
+            "reasonably assign the words or action to the wrong person.\n"
+            "- Quotations: is every direct quotation the exact source wording, "
+            "complete for the relevant saying, and attributed to the passage's "
+            "own speaker? Check the actual words, not just the meaning.\n"
+            "- Punctuation: are quotation marks balanced and correctly nested? "
+            "Accept any consistent straight or curly quote style; do not "
+            "reject solely for single-versus-double style.\n"
             "- Names and references: does the narration use the "
             "passage's own names and titles, and never speak a "
             "chapter, verse, or reference? An invented title is a "
@@ -1756,6 +2111,69 @@ class ContentGenerator(
         )
 
 
+    def verify_narration_coverage(
+        self,
+        scripture,
+        narration
+    ):
+        """Check that the retelling preserves every material part of the source."""
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+        prompt = (
+            "You are the completeness checker for \""
+            + name
+            + "\". Compare the narration with the entire source passage. "
+            "Your only task is to find material omissions.\n\n"
+            "SOURCE PASSAGE - READ FROM FIRST WORD TO LAST\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\nNARRATION\n"
+            + str(narration or "").strip()
+            + "\n\n"
+            "Make an internal ordered inventory of the passage's essential "
+            "events, statements, testimony, identities, relationships, and "
+            "stated purposes. Check the beginning, middle, and ending of the "
+            "source separately. A narration that starts partway through the "
+            "passage or skips an opening claim or purpose is incomplete, even "
+            "if everything it does include is accurate. Preserve claims that "
+            "establish who someone is, why an action is done, or what a "
+            "testimony declares.\n\n"
+            "This is a purposeful retelling, not a full read-through: do not "
+            "reject the omission of repetitive wording, minor incidental "
+            "details, or stylistic phrasing that does not change the story. "
+            "Reject any missing event, defining claim, theological statement, "
+            "relationship, or causal/purpose detail that materially contributes "
+            "to the passage. Do not confuse paraphrase with omission.\n\n"
+            "RETURN exactly one JSON object with: accurate (boolean) and "
+            "issues (string). Set accurate=true only when all material parts "
+            "are represented in the correct order. When false, list the exact "
+            "omitted part(s) and what must be restored.\n"
+        )
+
+        try:
+            response = self.llm.generate(
+                prompt,
+                response_format=NARRATION_VERIFICATION_SCHEMA
+            )
+        except Exception as error:
+            raise ContentGenerationError(
+                f"Narration completeness verification could not run: {error}"
+            ) from error
+
+        try:
+            verdict = self.parse_direction(response)
+        except ContentGenerationError:
+            return False, "The completeness check returned no parseable verdict."
+
+        if not isinstance(verdict, dict) or not isinstance(verdict.get("accurate"), bool):
+            return False, "The completeness check did not return an explicit boolean verdict."
+
+        if verdict["accurate"]:
+            return True, ""
+
+        issues = str(verdict.get("issues") or "").strip()
+        return False, issues or "The narration omits material content from the source passage."
+
+
     def verify_narration(
         self,
         scripture,
@@ -1767,6 +2185,26 @@ class ContentGenerator(
         explicit parsed true passes; anything else - transport error,
         no JSON, missing field - is a rejection with a reason.
         """
+        deterministic_issues = (
+            narration_quote_problems(
+                scripture.get("text", ""),
+                narration,
+            )
+            + narration_speaker_problems(
+                scripture.get("text", ""),
+                narration,
+            )
+        )
+        if deterministic_issues:
+            return False, "\n".join(deterministic_issues)
+
+        complete, coverage_issues = self.verify_narration_coverage(
+            scripture,
+            narration
+        )
+        if not complete:
+            return False, coverage_issues
+
         prompt = self.build_narration_verification_prompt(
             scripture,
             narration
@@ -1780,11 +2218,9 @@ class ContentGenerator(
             )
 
         except Exception as error:
-
-            return (
-                False,
-                f"The accuracy check itself failed: {error}"
-            )
+            raise ContentGenerationError(
+                f"Narration accuracy verification could not run: {error}"
+            ) from error
 
         try:
 
@@ -1918,55 +2354,76 @@ class ContentGenerator(
         self,
         scripture
     ):
-        """
-        Calls the LLM for narration, then checks it against the
-        passage. The WEBC passage is context and authority only; it
-        is never a narration fallback. The returned narration is used
-        as-is after transport parsing. A narration the accuracy check
-        rejects is re-written with the issues as feedback and checked
-        again, up to verification_attempts times; when the cap is hit
-        the last draft ships (set content_generation.verify_narration
-        to false to skip the check).
-        """
+        """Generate narration and keep rerolling until every enabled check passes."""
         verify = bool(
             self.generation_config.get("verify_narration", True)
         )
-        verification_attempts = max(
-            1,
-            int(
-                self.generation_config.get(
-                    "verification_attempts",
-                    3,
-                )
-            ),
-        )
 
         self.log("Writing the narration...")
-
         feedback = None
-        narration = ""
+        attempt = 0
 
-        for _ in range(verification_attempts):
-
+        while True:
+            attempt += 1
             prompt = self.build_narration_prompt(
                 scripture,
                 feedback=feedback
             )
 
-            narration = self.parse_narration(
-                self.llm.generate(
+            try:
+                response = self.llm.generate(
                     prompt,
                     response_format=NARRATION_SCHEMA
                 )
-            )
+            except Exception as error:
+                raise ContentGenerationError(
+                    f"Narration generation could not run: {error}"
+                ) from error
+
+            try:
+                narration = self.parse_narration(response)
+            except ContentGenerationError as error:
+                feedback = (
+                    "The previous narration response was unusable: "
+                    f"{error}. Return a complete JSON object with a non-empty "
+                    "narration field."
+                )
+                self.log(
+                    f"Narration attempt {attempt} rejected ({error}) - writing again..."
+                )
+                continue
 
             narration = repair_source_word_punctuation(
                 scripture.get("text", ""),
                 narration,
             )
 
+            deterministic_issues = (
+                narration_quote_problems(
+                    scripture.get("text", ""),
+                    narration,
+                )
+                + narration_speaker_problems(
+                    scripture.get("text", ""),
+                    narration,
+                )
+            )
+            if deterministic_issues:
+                feedback = (
+                    "DETERMINISTIC NARRATION QUALITY CHECK FAILED:\n"
+                    + "\n".join(deterministic_issues)
+                    + "\nCorrect these exact issues and regenerate the complete narration."
+                )
+                self.log(
+                    f"Narration attempt {attempt} rejected ({'; '.join(deterministic_issues)}) - writing again..."
+                )
+                continue
+
             if not verify:
-                break
+                self.log(
+                    f"Narration ready ({len(narration.split())} words; verification disabled)."
+                )
+                return narration
 
             accurate, issues = self.verify_narration(
                 scripture,
@@ -1974,26 +2431,16 @@ class ContentGenerator(
             )
 
             if accurate:
-                break
+                self.log(
+                    f"Narration passed all quality checks on attempt {attempt} "
+                    f"({len(narration.split())} words)."
+                )
+                return narration
 
             self.log(
-                f"Narration rejected ({issues}) - writing it "
-                "again..."
+                f"Narration attempt {attempt} rejected ({issues}) - writing again..."
             )
             feedback = issues
-        else:
-
-            self.log(
-                f"Narration verification never passed after "
-                f"{verification_attempts} attempts; shipping the "
-                "last draft."
-            )
-
-        self.log(
-            f"Narration ready ({len(narration.split())} words)."
-        )
-
-        return narration
 
     def generate(
         self,
@@ -2034,6 +2481,7 @@ class ContentGenerator(
                     segments,
                     index,
                     feedback=feedback or None,
+                    prior_visuals=visuals,
                 )
 
                 response = self.llm.generate(
@@ -2069,12 +2517,27 @@ class ContentGenerator(
                     )
                     continue
 
+                repetition_issue = visual_repetition_problem(
+                    query,
+                    visuals,
+                )
+                if repetition_issue:
+                    rejected_attempts.append({
+                        "visual": query,
+                        "reason": repetition_issue,
+                    })
+                    self.log(
+                        f"Segment {index + 1}: rejected ({repetition_issue}) - re-rolling..."
+                    )
+                    continue
+
                 if verify:
                     aligned, reason = self.verify_visual(
                         scripture,
                         segments,
                         index,
                         query,
+                        prior_visuals=visuals,
                     )
                     if not aligned:
                         rejected_attempts.append({
