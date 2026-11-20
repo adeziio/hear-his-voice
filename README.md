@@ -357,6 +357,54 @@ instead.
 Narration defaults to a calm, measured delivery
 (`en-US-AndrewMultilingualNeural`) at `-2%` with music at `0.07` volume, so the
 Word always sits clearly above the score.
+
+---
+
+## 🔐 Credentials and token refresh
+
+Credentials are loaded from `.env` using these keys:
+
+```env
+youtube_client_id=YOUR_CLIENT_ID
+youtube_client_secret=YOUR_CLIENT_SECRET
+youtube_refresh_token=YOUR_REFRESH_TOKEN
+```
+
+Uppercase variants (`YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, and `YOUTUBE_REFRESH_TOKEN`) are also supported. Environment values override the corresponding values in `config/youtube.json`, allowing that JSON file to contain only non-secret defaults such as `channel_name`.
+
+The token helper reads the client ID and client secret from `config/youtube.json` (or `.env`) automatically, opens Google's consent screen, and writes the resulting refresh token back to `.env`:
+
+```powershell
+python -m youtube.refresh_token
+```
+
+The OAuth flow requires both `youtube.upload` and `youtube.readonly` scopes. The readonly scope is used to resolve and verify the human-readable Channel Name before uploading. If an existing refresh token was created without that scope, run the helper again and approve the additional permission.
+
+---
+
+Optional, only needed when `config/instagram.json` points at `graph.facebook.com` instead of the default `graph.instagram.com`:
+
+```env
+instagram_access_token=...
+instagram_user_id=...
+```
+
+Optional, only needed when `config/instagram.json` points at `graph.facebook.com` instead of the default `graph.instagram.com`:
+
+```env
+instagram_app_id=...
+instagram_app_secret=...
+```
+
+Refresh the ~60-day token before it expires — no arguments needed:
+
+```powershell
+python -m instagram.refresh_token
+```
+
+The helper exchanges the current still-valid token via the appropriate grant (`ig_refresh_token` on `graph.instagram.com`, `fb_exchange_token` on `graph.facebook.com`) and writes the new token back to `.env` automatically.
+```
+
 ### Why WEBC and not the Protestant `web`
 
 WEBC is the Catholic edition. The tests assert the distinguishing markers:
