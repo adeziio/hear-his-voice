@@ -37,9 +37,10 @@ def _duration_target_seconds(config):
     config/ai_models.json -> models.video_model.snapgenai (shared
     settings, e.g. "10s").
 
-    One clip carries one narration sentence, so this is the maximum
-    spoken length any one segment should reach before it is divided. The
-    value comes from configuration, never from a hardcoded constant;
+    The configured clip duration sets the maximum spoken length assigned
+    to one visual segment. The narration is divided into word chunks later,
+    so a cut may fall mid-sentence. The value comes from configuration,
+    never from a hardcoded constant;
     DEFAULT_SECONDS_PER_VISUAL is only the fallback used when the setting
     is missing or unparseable.
     """
@@ -144,20 +145,41 @@ VISUAL_SCHEMA = {
 }
 
 
-# The metadata schema: the episode title, summary, and mood, asked for
-# in one separate call after the visuals are written. maxLength is not
-# decoration - it is a grammar-level brake on the two failure modes this
-# channel actually hit: a poetic title ("Genealogy of Light") and an
-# interpretive summary ("revealing a divine ancestry rooted in faith and
-# promise" for a passage that says no such thing).
+# The metadata schema: the episode title, summary, and mood, generated
+# after the visuals are written. The title and summary then receive one
+# independent review call with separate verdicts, followed by targeted
+# repair and re-review when either field fails. A deterministic summary
+# completeness guard prevents visibly truncated summaries without imposing
+# a word, character, or sentence-count limit.
 METADATA_SCHEMA = {
     "type": "object",
     "properties": {
         "title": {"type": "string", "maxLength": 90},
-        "summary": {"type": "string", "maxLength": 180},
+        "summary": {"type": "string"},
         "mood": {"type": "string"},
     },
     "required": ["title", "summary", "mood"],
+}
+
+
+METADATA_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title_passes": {"type": "boolean"},
+        "title_issues": {"type": "string"},
+        "summary_passes": {"type": "boolean"},
+        "summary_issues": {"type": "string"},
+        "summary_attribution_passes": {"type": "boolean"},
+        "summary_attribution_issues": {"type": "string"},
+    },
+    "required": [
+        "title_passes",
+        "title_issues",
+        "summary_passes",
+        "summary_issues",
+        "summary_attribution_passes",
+        "summary_attribution_issues",
+    ],
 }
 
 
@@ -189,9 +211,105 @@ VISUAL_VERIFICATION_SCHEMA = {
     "type": "object",
     "properties": {
         "aligned": {"type": "boolean"},
+        "has_concrete_action": {"type": "boolean"},
+        "depicts_concrete_action": {"type": "boolean"},
         "reason": {"type": "string"},
     },
-    "required": ["aligned", "reason"],
+    "required": [
+        "aligned",
+        "has_concrete_action",
+        "depicts_concrete_action",
+        "reason",
+    ],
+}
+
+
+VISUAL_PAIRWISE_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pair_reviews": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "left_segment_index": {"type": "integer"},
+                    "right_segment_index": {"type": "integer"},
+                    "left_visual_action": {"type": "string"},
+                    "right_visual_action": {"type": "string"},
+                    "left_visual_composition": {"type": "string"},
+                    "right_visual_composition": {"type": "string"},
+                    "narrated_beats_are_distinct": {"type": "boolean"},
+                    "same_primary_action": {"type": "boolean"},
+                    "same_primary_composition": {"type": "boolean"},
+                    "adds_meaningful_difference": {"type": "boolean"},
+                    "materially_repetitive": {"type": "boolean"},
+                    "issue": {"type": "string"},
+                    "suggested_focus": {"type": "string"},
+                },
+                "required": [
+                    "left_segment_index",
+                    "right_segment_index",
+                    "left_visual_action",
+                    "right_visual_action",
+                    "left_visual_composition",
+                    "right_visual_composition",
+                    "narrated_beats_are_distinct",
+                    "same_primary_action",
+                    "same_primary_composition",
+                    "adds_meaningful_difference",
+                    "materially_repetitive",
+                    "issue",
+                    "suggested_focus",
+                ],
+            },
+        },
+    },
+    "required": ["pair_reviews"],
+}
+
+
+VISUAL_SEQUENCE_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "passes": {"type": "boolean"},
+        "segment_reviews": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_index": {"type": "integer"},
+                    "narrated_beat": {"type": "string"},
+                    "depicted_beat": {"type": "string"},
+                    "beat_is_represented": {"type": "boolean"},
+                    "materially_repetitive": {"type": "boolean"},
+                    "issue": {"type": "string"},
+                    "suggested_focus": {"type": "string"},
+                },
+                "required": [
+                    "segment_index",
+                    "narrated_beat",
+                    "depicted_beat",
+                    "beat_is_represented",
+                    "materially_repetitive",
+                    "issue",
+                    "suggested_focus",
+                ],
+            },
+        },
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_index": {"type": "integer"},
+                    "issue": {"type": "string"},
+                    "suggested_focus": {"type": "string"},
+                },
+                "required": ["segment_index", "issue", "suggested_focus"],
+            },
+        },
+    },
+    "required": ["passes", "segment_reviews", "findings"],
 }
 
 
@@ -202,6 +320,16 @@ NARRATION_VERIFICATION_SCHEMA = {
         "issues": {"type": "string"},
     },
     "required": ["accurate", "issues"],
+}
+
+
+NARRATION_STORYTELLING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "passes": {"type": "boolean"},
+        "issues": {"type": "string"},
+    },
+    "required": ["passes", "issues"],
 }
 
 
@@ -418,6 +546,29 @@ def _scan_quoted_spans(text):
         if char in ("'", "’") and previous.isalnum() and following.isalnum():
             continue
 
+        # A trailing apostrophe after s can mark a possessive (the disciples'
+        # boat, Moses' words). Outside a quoted span it is unambiguous when a
+        # following word is present. Inside a single-quoted span, look for a
+        # later matching closer: this distinguishes a possessive inside a
+        # phrase such as ‘Jesus’ mother’ from a quote around one word ('Jesus').
+        if (
+            char in ("'", "’")
+            and previous.lower() == "s"
+            and previous.isalnum()
+            and following.isspace()
+            and re.match(r"\s+[A-Za-z0-9]", value[index + 1:])
+        ):
+            closes_active_single_quote = bool(
+                stack and stack[-1]["closing"] == char
+            )
+            if not closes_active_single_quote:
+                continue
+            later_closer = value.find(char, index + 1)
+            if later_closer >= 0 and re.search(
+                r"[A-Za-z0-9]", value[index + 1:later_closer]
+            ):
+                continue
+
         if char in ("“", "‘"):
             stack.append({
                 "opening": char,
@@ -512,6 +663,104 @@ def _closest_source_quote_excerpt(source_text, quoted_words):
     return " ".join(excerpt.split())
 
 
+def _quoted_source_sentence_boundaries(quoted_source_text):
+    """Return word-index boundaries for complete sentences in a source quote."""
+    value = str(quoted_source_text or "")
+    tokens = list(re.finditer(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*", value))
+    if not tokens:
+        return set(), set(), []
+
+    words = []
+    token_word_ends = []
+    for token in tokens:
+        words.extend(_normalize_words(token.group(0)))
+        token_word_ends.append(len(words))
+
+    sentence_starts = {0}
+    sentence_ends = set()
+    for index in range(len(tokens) - 1):
+        gap = value[tokens[index].end():tokens[index + 1].start()]
+        # A sentence boundary must be terminal punctuation followed only by
+        # optional closing punctuation/whitespace before the next source word.
+        if re.search(r"[.!?](?:[\"'”’)]*)\s*$", gap):
+            boundary = token_word_ends[index]
+            sentence_ends.add(boundary)
+            sentence_starts.add(boundary)
+
+    sentence_ends.add(len(words))
+    return sentence_starts, sentence_ends, words
+
+
+def narration_quote_completeness_problems(source_text, narration):
+    """Reject quoted fragments that cut through a sentence in source speech.
+
+    A narration may select one or more complete sentences from a longer source
+    speech, but it must not put a clipped phrase or half-sentence in quotation
+    marks. The separate accuracy reviewer still decides whether the selected
+    complete sentence(s) preserve the whole relevant saying. This conservative
+    deterministic check only applies when the source itself marks the speech
+    with quotation marks; otherwise it leaves the decision to the LLM reviewer.
+    """
+    source = str(source_text or "")
+    source_spans, _source_structure_problems = _scan_quoted_spans(source)
+    narration_spans, _narration_structure_problems = _scan_quoted_spans(narration)
+    if not source_spans or not narration_spans:
+        return []
+
+    source_quotes = []
+    for source_quote, _start, _end in source_spans:
+        variants = [source_quote]
+        without_editorial_gloss = re.sub(
+            r"\(\s*which is\b[^)]*\)",
+            " ",
+            source_quote,
+            flags=re.IGNORECASE,
+        )
+        if without_editorial_gloss != source_quote:
+            variants.append(without_editorial_gloss)
+        for variant in variants:
+            sentence_starts, sentence_ends, words = _quoted_source_sentence_boundaries(variant)
+            if words:
+                source_quotes.append((sentence_starts, sentence_ends, words))
+
+    problems = []
+    for quoted_text, _start, _end in narration_spans:
+        quoted_words = _normalize_words(quoted_text)
+        if not quoted_words:
+            continue
+
+        found_inside_source_speech = False
+        complete_source_sentence = False
+        width = len(quoted_words)
+
+        for sentence_starts, sentence_ends, source_words in source_quotes:
+            if len(source_words) < width:
+                continue
+            for start in range(len(source_words) - width + 1):
+                if source_words[start:start + width] != quoted_words:
+                    continue
+
+                found_inside_source_speech = True
+                end = start + width
+                if start in sentence_starts and end in sentence_ends:
+                    complete_source_sentence = True
+                    break
+            if complete_source_sentence:
+                break
+
+        if found_inside_source_speech and not complete_source_sentence:
+            excerpt = " ".join(quoted_text.split())
+            if len(excerpt) > 120:
+                excerpt = excerpt[:117] + "..."
+            problems.append(
+                f'Direct quotation "{excerpt}" is only part of a sentence in the source quotation. '
+                "Quote the complete source sentence (or complete selected sentence(s)) exactly, "
+                "or paraphrase the fragment outside quotation marks. Do not shorten a quoted saying."
+            )
+
+    return problems
+
+
 def narration_quote_problems(source_text, narration):
     """Reject unbalanced quotes and quoted words that are not source-exact.
 
@@ -519,6 +768,8 @@ def narration_quote_problems(source_text, narration):
     source is checked both as printed and with those glosses omitted, allowing
     narration either to retain the exact parenthetical text or keep it outside
     the spoken quotation. Actual quoted words must still match consecutively.
+    When the source marks a direct-speech span, quotations must also begin and
+    end on complete source-sentence boundaries rather than clipping a saying.
     """
     spans, problems = _scan_quoted_spans(narration)
     source = str(source_text or "")
@@ -559,6 +810,9 @@ def narration_quote_problems(source_text, narration):
                 f'{detail} Restore the exact WEBC wording; do not paraphrase words inside quotation marks.'
             )
 
+    problems.extend(
+        narration_quote_completeness_problems(source, narration)
+    )
     return problems
 
 
@@ -1229,13 +1483,16 @@ class ContentGenerator(
                "actions or scenes:\n" + prior_visual_context
                if prior_visual_context else "")
             + "\n\n"
-            "Create one clear, self-contained visual scene that best "
-            "illustrates the main event or moment expressed by the "
-            "ASSIGNED NARRATION SEGMENT. This segment is a word-count "
-            "chunk and may begin or end in the middle of a sentence; "
-            "use the adjacent narration to understand its grammar and "
-            "meaning, rather than treating the fragment as an isolated "
-            "complete sentence.\n\n"
+            "Create one clear, self-contained visual scene that illustrates "
+            "at least one important moment from the ASSIGNED NARRATION SEGMENT. "
+            "This segment is a word-count chunk and may contain more than one "
+            "action or story beat, or may begin or end in the middle of a sentence. "
+            "Use adjacent narration to understand its grammar and meaning. "
+            "Because this is one short clip, choose the single clearest meaningful "
+            "moment; do NOT try to depict every action or every sentence in the "
+            "segment, and do NOT combine separate chronological events into a "
+            "multi-scene montage. Showing one accurate, relevant part of the "
+            "segment is sufficient.\n\n"
             "The assigned segment determines what the clip is about. "
             "Use the full narration and Scripture passage only to clarify "
             "who is involved, the biblical setting, and the order of events. "
@@ -1243,18 +1500,18 @@ class ContentGenerator(
             "familiar event from this passage or from elsewhere in Scripture. "
             "Do not show a later or earlier event instead of the moment "
             "being narrated.\n\n"
-            "Make the scene concrete and recognizable: show the relevant "
-            "person or people performing the narrated action. First identify "
-            "whether the assigned segment describes a physical event or action "
-            "that can be shown. When it does, depict that event directly, with "
-            "the correct person and recipient or target; do not substitute a "
-            "shot of someone merely talking about the event, a generic "
-            "landscape, or a reaction shot. Use a speaker, listener, or "
-            "symbolic representation only when the segment is primarily "
-            "dialogue or an abstract statement with no concrete action to show. "
-            "Do not use unrelated biblical scenes as substitutes. The clip "
-            "does not need to illustrate every word literally, but its "
-            "connection to this segment must be clear.\n\n"
+            "Make the chosen moment concrete and recognizable. If the segment "
+            "contains several actions, select ONE important, visually clear "
+            "action or moment and depict that well; the clip does not need to "
+            "cover the other actions in the same segment. Include the people, "
+            "objects, or setting needed to make the selected moment understandable, "
+            "but do not force every named person into the shot. A relevant symbolic "
+            "or contextual image is also acceptable when it meaningfully represents "
+            "one part of the assigned segment. Do not use an unrelated biblical "
+            "scene as a substitute. Keep the prompt to one coherent continuous shot. "
+            "Do not add a separate later or earlier event as though it is happening "
+            "simultaneously; subtle atmosphere or background context is fine when it "
+            "does not confuse the chronology or distract from the selected moment.\n\n"
             "Only include characters who belong in this particular moment. "
             "Name the relevant biblical characters explicitly, using their "
             "full name and title when the passage establishes one. Do not "
@@ -1370,46 +1627,97 @@ class ContentGenerator(
                "or setting may recur when the action genuinely changes.\n"
                + prior_visual_context
                if prior_visual_context else "")
-            + "\n\nAccept the visual when it clearly represents the central "
-            "action, event, speaker, listener, or idea in the assigned "
-            "segment and remains consistent with the passage. The segment "
-            "is a word-count chunk and may be part of a longer sentence; "
-            "use the neighbouring narration to understand it.\n\n"
-            "Reject for a material mismatch: it depicts a different biblical "
-            "event; shows an unrelated scene; gives the central action, speech, "
-            "or outcome to the wrong person; shows the wrong recipient or target; "
-            "contradicts an explicit setting, time, or condition; substitutes a "
-            "later or earlier event; or adds an unsupported action or outcome "
-            "that changes the scene.\n"
-            "For spoken words, verify the speaker against the source passage's "
-            "grammar, not merely the nearest person named in the sentence. "
-            "For a concrete event, the correct actor and target must both be "
-            "visible in the proposed scene when they are identifiable from the text.\n"
-            "CONCRETE-ACTION CHECK\n"
-            "Identify the main physical action or event in the assigned "
-            "segment. If the segment describes an event that can be visibly "
-            "depicted, the proposed visual must show that event and its correct "
-            "subject and target. A scene of someone speaking about the event "
-            "is not aligned when the event itself is visually depictable. Use "
-            "a speaker-focused or symbolic scene only when the segment has no "
-            "concrete physical action to show.\n\n"
+            + "\n\nACCEPTANCE STANDARD FOR A SHORT CLIP\n"
+            "A narration segment may contain several actions, clauses, or story "
+            "beats because it is cut by word count, not by scene. The visual is "
+            "NOT required to illustrate the whole segment. Accept it when it clearly "
+            "and meaningfully depicts AT LEAST ONE important action, moment, person, "
+            "or idea that genuinely belongs to this assigned segment. One coherent "
+            "10-second scene is preferred over trying to fit several events into "
+            "one clip. Do not reject a good scene merely because another action or "
+            "detail from the same segment is not shown. Use neighboring narration "
+            "to resolve fragments and identify possible moments; it does not mean "
+            "every neighboring or later event must appear in this visual.\n\n"
+            "Reject only a material mismatch: an unrelated scene, a wrong central "
+            "actor or recipient for the moment chosen, a clear contradiction of "
+            "Scripture, or a chronology error that materially misleads the viewer. "
+            "An extra background detail or subtle foreshadowing is not automatically "
+            "a failure; reject it only if it makes separate events appear to happen "
+            "at the same time, changes who did what, or distracts from / contradicts "
+            "the selected relevant moment.\n\n"
+            "For the particular moment the prompt chooses to show, verify that "
+            "its actors and relationships are faithful. Do not require every actor, "
+            "recipient, action, or outcome mentioned anywhere in a multi-beat "
+            "segment to appear in this one shot. A wrong actor or recipient is a "
+            "failure only when the chosen scene actually assigns that moment to "
+            "the wrong person.\n"
+            "When the chosen scene depicts speech, verify the speaker against "
+            "the source passage's grammar, not merely the nearest person named "
+            "in the sentence. For a chosen physical action, include enough of "
+            "the correct actor and relevant recipient or object to make THAT "
+            "selected moment understandable; do not require participants or "
+            "targets belonging only to other actions in the same segment.\n"
+            "CONCRETE-ACTION CHECK - REQUIRED SEPARATE DECISION\n"
+            "Identify the meaningful story beats present in this segment, using "
+            "the surrounding words to resolve sentence fragments. Then identify "
+            "which one of those beats the proposed visual actually chooses to show. "
+            "The segment may contain multiple events; one accurate, important beat "
+            "is sufficient for this short clip.\n"
+            "Set has_concrete_action=true when at least one beat in the segment is "
+            "a visibly depictable physical action or stage of an event, such as "
+            "taking or carrying someone, departing, traveling, arriving, entering, "
+            "giving, receiving, or gathering. Set it false when the central beat "
+            "is a state, condition, or passage of time rather than a distinct "
+            "physical action. This includes remaining, staying, living, or "
+            "continuing to reside in a stated place until a later event, when no "
+            "separate physical action is narrated.\n"
+            "IMPORTANT - CONTEXTUAL STATES ARE NOT PHYSICAL ACTIONS: If the "
+            "narration says people remained or stayed somewhere until a later "
+            "event, a faithful scene showing those people in that place is enough "
+            "to represent the beat. A scene showing people living in the stated "
+            "place can represent that they remained there. Do NOT "
+            "require the image to demonstrate duration, waiting, watchfulness, "
+            "anticipation, the later event, or the reason their stay ended. Do NOT "
+            "require time-lapse imagery, aging, news of a death, or symbolic proof "
+            "of time passing unless the narration actually describes those things.\n"
+            "Set depicts_concrete_action=true when the visual clearly shows at "
+            "least ONE meaningful beat from the segment. If that chosen beat is a "
+            "physical action, it should be recognizable as that action and be "
+            "consistent with the source. It does not have to show the other actions "
+            "in the segment, every participant, or the full outcome. If the chosen "
+            "beat is a contextual state, line of dialogue, prophecy, or abstract idea, "
+            "a meaningful contextual or symbolic scene can also satisfy this field. "
+            "Do not fail a relevant scene just because it illustrates one part rather "
+            "than the whole chunk. Fail only when none of the meaningful beats in the "
+            "assigned segment is represented, or when the selected scene materially "
+            "misrepresents the passage.\n\n"
             "CHARACTER DEPICTION CHECK\n"
-            "When a named character is central to the visual, check whether "
-            "their appearance and clothing are described clearly enough to "
-            "make them recognizable. Accept distinctive details established "
-            "elsewhere in Scripture when relevant to the scene. Reject "
-            "unnecessarily generic descriptions when recognizable biblical "
-            "details are available. Do not require physical details that "
-            "Scripture does not establish or reject reasonable artistic "
-            "variations.\n\n"
-            "A relevant representative or symbolic visual is acceptable "
-            "for dialogue, prophecy, quotations, travel, or abstract "
-            "statements only when the assigned segment has no concrete "
-            "physical action that can be shown. Do not require every person "
-            "or detail from the full passage to appear in this one clip. Do "
-            "not reject simply because the visual is not a word-for-word "
-            "reenactment, or because it uses reasonable atmosphere, framing, "
-            "or background detail.\n\n"
+            "Use recognizable appearance, clothing, and regional details "
+            "established in Scripture or clearly supported by the biblical setting "
+            "when they help identify a central character. However, do not reject "
+            "an otherwise relevant, period-appropriate scene merely because the "
+            "prompt does not spell out every known physical or clothing detail. "
+            "Reject only a clear contradiction, anachronism, or materially "
+            "inappropriate depiction; accept reasonable artistic variation and "
+            "details Scripture does not specify.\n\n"
+            "A relevant representative or symbolic visual may be acceptable "
+            "even when the segment also mentions physical actions, provided the "
+            "chosen image meaningfully illustrates one important part of that "
+            "segment. Do not require every person or detail from the full passage "
+            "to appear in this one clip. Do not reject simply because the visual "
+            "is not a word-for-word reenactment, omits secondary actions, or uses "
+            "reasonable atmosphere, framing, or background detail.\n\n"
+            "CHRONOLOGY AND LOCATION CHECK\n"
+            "Read the narration in its actual event order. Distinguish what has "
+            "already happened at the assigned moment from what happens later. "
+            "Never project a later departure, arrival, destination, or outcome "
+            "backward onto an earlier warning, dream, conversation, or decision. "
+            "A warning to leave a place occurs before the departure unless the "
+            "source explicitly says otherwise. Do not infer that a character is "
+            "already at a later destination merely because the full passage says "
+            "they travel there afterward. If the source does not establish the "
+            "exact location for this moment, accept a plausible location that "
+            "does not contradict the passage; do not invent a location conflict.\n\n"
             "The passage and surrounding narration provide context; they "
             "do not authorize replacing the assigned segment with another "
             "scene. Do not infer exact character locations from sentence "
@@ -1417,10 +1725,17 @@ class ContentGenerator(
             "when the proposed scene clearly contradicts what the passage "
             "actually establishes for this moment.\n\n"
             "RETURN exactly one JSON object:\n"
-            "- aligned: true if the visual is clearly relevant and has no "
-            "material contradiction; otherwise false.\n"
-            "- reason: if false, briefly identify the specific mismatch and "
-            "what the visual should represent instead; if true, an empty string.\n"
+            "- aligned: true when the visual faithfully and meaningfully shows "
+            "at least one important beat from the assigned segment, without a "
+            "material contradiction. Do not require complete segment coverage.\n"
+            "- has_concrete_action: true if the segment contains at least one "
+            "physical action that could be shown; otherwise false.\n"
+            "- depicts_concrete_action: true when the visual meaningfully depicts "
+            "at least one relevant beat from the segment (a physical action, "
+            "contextual state, speech, or symbolic idea); it need not depict all "
+            "actions in the chunk.\n"
+            "- reason: if any check fails, briefly identify the specific mismatch "
+            "and what the visual should represent instead; if all pass, an empty string.\n"
         )
 
 
@@ -1459,17 +1774,665 @@ class ContentGenerator(
         if (
             not isinstance(verdict, dict)
             or not isinstance(verdict.get("aligned"), bool)
+            or not isinstance(verdict.get("has_concrete_action"), bool)
+            or not isinstance(verdict.get("depicts_concrete_action"), bool)
         ):
-            return False, "Visual verification did not return an explicit boolean verdict; generate and verify a new prompt."
+            return False, (
+                "Visual verification did not return explicit relevance and "
+                "concrete-action verdicts; generate and verify a new prompt."
+            )
+
+        reason = str(verdict.get("reason") or "").strip()
+        if not verdict["depicts_concrete_action"]:
+            if verdict["has_concrete_action"]:
+                action_issue = (
+                    "The assigned segment contains a depictable physical action, "
+                    "but the proposed visual does not actually show that action. "
+                    "Show the correct actor performing the narrated event, rather "
+                    "than a related prayer, reaction, listening pose, distant "
+                    "silhouette, or general setting."
+                )
+            else:
+                action_issue = (
+                    "The proposed visual does not meaningfully represent the "
+                    "assigned segment's speech, idea, or abstract beat."
+                )
+            reason = f"{reason} {action_issue}".strip()
+            return False, reason
 
         if verdict["aligned"]:
             return True, ""
 
-        reason = str(verdict.get("reason") or "").strip()
         if not reason:
             reason = "The visual does not clearly represent the assigned narration segment."
 
         return False, reason
+
+
+    def build_visual_sequence_review_prompt(
+        self,
+        scripture,
+        segments,
+        visuals,
+    ):
+        """Build an episode-wide review of story-beat coverage and visual progression."""
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+
+        sequence = []
+        for index, (segment, visual) in enumerate(zip(segments, visuals), start=1):
+            if isinstance(visual, dict):
+                prompt = str(visual.get("search_query") or "").strip()
+                direction = str(visual.get("visual_direction") or "").strip()
+            else:
+                prompt = str(visual or "").strip()
+                direction = ""
+
+            entry = (
+                f"SEGMENT {index} NARRATION\n{segment}\n\n"
+                f"SEGMENT {index} VISUAL PROMPT\n{prompt}"
+            )
+            if direction:
+                entry += f"\n\nSEGMENT {index} VISUAL DIRECTION\n{direction}"
+            sequence.append(entry)
+
+        return (
+            "You are the independent episode-wide visual storytelling and "
+            "coverage reviewer for \""
+            + name
+            + "\". Every visual below has passed an initial individual review, "
+            "but you must independently check whether each prompt actually "
+            "depicts its assigned story beat and whether the sequence works "
+            "as a coherent set. Do not assume an individual approval proves "
+            "the concrete action is shown.\n\n"
+            "SCRIPTURE REFERENCE\n"
+            + scripture["reference"]
+            + " ("
+            + scripture["translation"]
+            + ")\n\nSOURCE PASSAGE - CONTEXT FOR FEASIBLE ALTERNATIVES\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\nCOMPLETE VISUAL SEQUENCE IN NARRATION ORDER\n"
+            + "\n\n------------------------------\n\n".join(sequence)
+            + "\n\n"
+            "MANDATORY PER-SEGMENT STORY-BEAT AUDIT\n"
+            "For EVERY segment, independently do the following before deciding "
+            "whether the episode passes:\n"
+            "1. Identify the important story beats present in that narration "
+            "segment, resolving sentence fragments with neighboring narration. "
+            "A single word-count segment may contain multiple actions or events.\n"
+            "2. State what the visual prompt actually depicts as its main subject "
+            "and action. Do not infer an action that the prompt does not describe.\n"
+            "3. Decide whether the visual clearly represents AT LEAST ONE meaningful "
+            "beat from that segment. One coherent scene is sufficient even when the "
+            "segment mentions several actions; do not require the visual to cover "
+            "every action, participant, or detail in the chunk. The correct character "
+            "or general setting alone is not enough if the chosen scene is unrelated, "
+            "but a clearly relevant partial illustration is enough. A distant person "
+            "need not perform every action mentioned elsewhere in the segment.\n"
+            "IMPORTANT - STATES AND DURATION: A narration beat such as people "
+            "remaining, staying, living, or continuing to reside in a place until "
+            "a later event is a contextual state, not a physical action that must "
+            "be performed on camera. A faithful scene showing the relevant people "
+            "in the stated place is sufficient. A scene showing people living in "
+            "the stated place can represent that they remained there. Do NOT "
+            "demand visible waiting, watchfulness, anticipation, time passing, "
+            "aging, news of the later event, or a depiction of why the stay ended. "
+            "Do not reject a suitable contextual scene merely because it cannot "
+            "visually prove how long the people stayed or what later ended that stay.\n"
+            "4. Compare the shot with earlier and later clips. Decide whether it "
+            "adds meaningful visual information or substantially repeats the "
+            "same action, pose, composition, and focal subject.\n\n"
+            "Do not give a visual credit for an action that appears only in the "
+            "narration or is merely implied by an unrelated setting. Judge what the "
+            "shot actually describes. However, because each clip is short, showing "
+            "one meaningful action or moment from a multi-beat segment is sufficient; "
+            "the other actions in that segment may be left for narration or neighboring "
+            "clips. A contextual state such as remaining, staying, or living in a place "
+            "does NOT require a physical action or a visual demonstration of duration. "
+            "A meaningful scene showing the relevant people in the stated place is "
+            "sufficient. For speech, prophecy, or abstract ideas, a meaningful symbolic "
+            "or contextual image is acceptable even if the same segment also mentions "
+            "a physical event that the clip does not show.\n\n"
+            "CHRONOLOGY AUDIT\n"
+            "Read every segment in narration order. Do not project a later event "
+            "or destination backward into an earlier segment. A later arrival "
+            "does not establish that the character was already at that destination "
+            "during an earlier warning or decision. If the passage leaves a precise "
+            "location unstated, do not reject a plausible location as a contradiction. "
+            "Only identify a chronology or location error when the source or narration "
+            "clearly establishes that the proposed scene is impossible at that moment.\n\n"
+            "SEQUENCE STORYTELLING REVIEW\n"
+            "- Does the ordered set of clips move through the passage's major "
+            "events and stages in a way a viewer can follow?\n"
+            "- Is the overall story progression understandable from the sequence "
+            "as a whole? Individual clips may show only one selected moment, so do "
+            "not require every action or transition mentioned inside each chunk "
+            "to appear visually. Flag an omitted transition only when its absence "
+            "across the complete sequence would make the story materially confusing "
+            "or misleading. Use only events that actually occur in this passage.\n"
+            "- Do consecutive clips offer meaningfully different visual "
+            "information when the story provides room for it, rather than merely "
+            "rewording the same pose or shot?\n"
+            "- Are any major segment beats missing because multiple prompts "
+            "reuse a general scene that does not show the assigned event?\n\n"
+            "IMPORTANT ACCEPTANCE STANDARD\n"
+            "Be practical, not perfectionistic. The episode may contain one or "
+            "two less compelling or imperfect clips if they are still relevant "
+            "and do not materially misrepresent the narration. Do not regenerate "
+            "a clip merely to make every shot exceptional. However, do not pass "
+            "a sequence where no meaningful part of a segment is represented, "
+            "where the visuals materially misrepresent an essential story turn, "
+            "or where repeated shots substantially replace distinct narrated "
+            "events. Do not fail the sequence merely because some actions or "
+            "transitions are conveyed by narration rather than shown on screen.\n"
+            "Do not require every clip to depict a different event, location, "
+            "character, or action. The same people or setting may recur when "
+            "the action or stage genuinely changes. Do not manufacture variety "
+            "by inventing actions, emotions, props, locations, or events that "
+            "the passage does not support. Accept reasonable symbolic imagery "
+            "for abstract or prophetic narration.\n\n"
+            "TARGETED FINDINGS\n"
+            "When a problem exists, identify the smallest set of segments that "
+            "should be regenerated. For a repeated pair, normally flag only the "
+            "later or weaker segment. Give a specific reason and a feasible "
+            "alternative focus grounded in that segment and the passage. If no "
+            "clearly better, faithful alternative exists for a minor visual "
+            "weakness, do not force a change.\n\n"
+            "RETURN EXACTLY ONE JSON OBJECT\n"
+            "- passes: true when every segment has at least one meaningful beat "
+            "represented and the overall sequence has no material contradiction "
+            "or repetition that obscures the story. Do NOT require complete coverage "
+            "of every segment's actions or details. Minor imperfections in one or "
+            "two otherwise relevant clips do not prevent a pass.\n"
+            "- segment_reviews: return EXACTLY one assessment for EVERY segment, "
+            "in segment order. Each assessment must include segment_index "
+            "(1-based), narrated_beat (the meaningful beat selected for review "
+            "from the segment, not an exhaustive list), depicted_beat "
+            "(what the prompt actually shows), beat_is_represented (boolean), "
+            "materially_repetitive (boolean), issue (empty only when no material "
+            "problem), and suggested_focus (empty when no replacement is needed).\n"
+            "- findings: include only segments that need replacement, using "
+            "segment_index (1-based), issue, and suggested_focus. Findings must "
+            "include segments where NONE of the meaningful beats in the chunk is "
+            "represented, a material contradiction exists, or a later shot "
+            "materially repeats an earlier shot for a distinct narrated beat. Do "
+            "not flag a segment merely because some secondary narration detail "
+            "is not shown.\n"
+        )
+
+
+    def build_visual_pairwise_review_prompt(
+        self,
+        scripture,
+        segments,
+        visuals,
+    ):
+        """Build a focused comparison of every adjacent pair of visual prompts."""
+        pairs = []
+        for index in range(len(segments) - 1):
+            left_visual = visuals[index]
+            right_visual = visuals[index + 1]
+            left_prompt = (
+                str(left_visual.get("search_query") or "").strip()
+                if isinstance(left_visual, dict)
+                else str(left_visual or "").strip()
+            )
+            right_prompt = (
+                str(right_visual.get("search_query") or "").strip()
+                if isinstance(right_visual, dict)
+                else str(right_visual or "").strip()
+            )
+            pairs.append(
+                f"ADJACENT PAIR {index + 1} AND {index + 2}\n"
+                f"LEFT NARRATION (segment {index + 1})\n{segments[index]}\n\n"
+                f"LEFT VISUAL PROMPT\n{left_prompt}\n\n"
+                f"RIGHT NARRATION (segment {index + 2})\n{segments[index + 1]}\n\n"
+                f"RIGHT VISUAL PROMPT\n{right_prompt}"
+            )
+
+        return (
+            "You are an independent visual repetition auditor for the Hear His Voice episode. "
+            "Your only task is to compare each adjacent pair of proposed visual prompts. "
+            "The previous episode-wide reviewer may have missed near-duplicate shots, so "
+            "inspect the actual scene descriptions side by side rather than relying on its verdict.\n\n"
+            "SCRIPTURE REFERENCE\n"
+            + scripture["reference"]
+            + " ("
+            + scripture["translation"]
+            + ")\n\nSOURCE PASSAGE\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\nADJACENT VISUAL PAIRS IN EPISODE ORDER\n"
+            + "\n\n========================================\n\n".join(pairs)
+            + "\n\nFOR EACH PAIR, COMPARE THESE SEPARATELY\n"
+            "1. Are the two narration chunks expressing the same continuous story beat, "
+            "or are they different stages/actions/events? A word-count boundary may split "
+            "one continuous sentence, quotation, or action; do not call that a problem by itself.\n"
+            "2. What is the main action and composition actually described in the LEFT visual?\n"
+            "3. What is the main action and composition actually described in the RIGHT visual?\n"
+            "4. Are the primary physical action and composition substantially the same? "
+            "Compare the actor's pose/action, focal subject, camera framing, and scene setup. "
+            "Changing adjectives, lighting words, or small background details does not make "
+            "a duplicate shot meaningfully different.\n"
+            "5. Does the later prompt add a meaningful visual difference or show the next "
+            "stage of the story? A different action, actual change of stage/location, "
+            "different focal event, or substantially different useful composition can count.\n\n"
+            "MATERIAL REPETITION STANDARD\n"
+            "Mark materially_repetitive=true only when the two narration beats are distinct "
+            "and the visuals substantially reuse the same primary action AND composition "
+            "without adding meaningful story information. Also mark it true when the later "
+            "visual clearly substitutes the earlier shot for a different concrete action "
+            "that its narration segment describes. Do NOT flag a continuous speech/dream/event "
+            "merely because it spans adjacent word chunks, provided the same scene remains "
+            "a faithful depiction of that continuous beat. Repeated characters, locations, "
+            "clothing, or general atmosphere alone are not repetition. Do not demand every "
+            "pair be visually different.\n\n"
+            "Be practical: one or two less varied clips can be tolerated when they remain "
+            "relevant. Flag clear duplicate shots or a repeated pose that replaces a new "
+            "story action; do not flag a minor imperfection or a reasonable artistic choice. "
+            "Do not invent a different event simply to create variety. When the later pair "
+            "member needs replacement, normally target the RIGHT segment only and propose "
+            "a concrete alternative supported by its narration and the source.\n\n"
+            "RETURN EXACTLY ONE JSON OBJECT containing pair_reviews, with EXACTLY one entry "
+            "for every adjacent pair, in order. For pair N and N+1 include: left_segment_index "
+            "(N), right_segment_index (N+1), left_visual_action (a short description of the "
+            "left prompt's actual main action), right_visual_action (the right prompt's actual "
+            "main action), left_visual_composition (the left prompt's main framing/focal "
+            "subject/pose), right_visual_composition (the right prompt's main framing/focal "
+            "subject/pose), narrated_beats_are_distinct (boolean), "
+            "same_primary_action (boolean), same_primary_composition (boolean), "
+            "adds_meaningful_difference (boolean), materially_repetitive (boolean), "
+            "issue (string), and suggested_focus (string). If not materially repetitive, "
+            "issue and suggested_focus should be empty. Never omit a pair. "
+            "When adjacent segments describe the same contextual state (for "
+            "example, a family continuing to live in the same place), suitable "
+            "depictions of that state may remain similar across clips; do not force "
+            "a new action or invent a time-passing device merely to create variety.\n"
+        )
+
+    def verify_visual_pairs(
+        self,
+        scripture,
+        segments,
+        visuals,
+    ):
+        """Independently audit every adjacent pair for substantial visual repetition."""
+        expected_pairs = max(0, len(segments) - 1)
+        if expected_pairs == 0:
+            return []
+        if len(segments) != len(visuals):
+            raise ContentGenerationError(
+                "Visual pair review requires exactly one visual per narration segment."
+            )
+
+        prompt = self.build_visual_pairwise_review_prompt(
+            scripture,
+            segments,
+            visuals,
+        )
+        try:
+            response = self.llm.generate(
+                prompt,
+                response_format=VISUAL_PAIRWISE_VERIFICATION_SCHEMA,
+            )
+        except Exception as error:
+            raise ContentGenerationError(
+                f"Adjacent visual-pair review could not run: {error}"
+            ) from error
+
+        try:
+            verdict = self.parse_direction(response)
+        except ContentGenerationError as error:
+            raise ContentGenerationError(
+                "Adjacent visual-pair review returned no parseable verdict."
+            ) from error
+
+        if not isinstance(verdict, dict) or not isinstance(verdict.get("pair_reviews"), list):
+            raise ContentGenerationError(
+                "Adjacent visual-pair review did not return pair_reviews."
+            )
+
+        raw_pairs = verdict["pair_reviews"]
+        if len(raw_pairs) != expected_pairs:
+            raise ContentGenerationError(
+                "Adjacent visual-pair review must assess every neighboring pair exactly once."
+            )
+
+        findings_by_segment = {}
+        seen_pairs = set()
+
+        def _normalize_review_description(value):
+            return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+        for item in raw_pairs:
+            if not isinstance(item, dict):
+                raise ContentGenerationError(
+                    "Adjacent visual-pair review returned a malformed pair assessment."
+                )
+
+            left_index = item.get("left_segment_index")
+            right_index = item.get("right_segment_index")
+            if (
+                isinstance(left_index, bool)
+                or isinstance(right_index, bool)
+                or not isinstance(left_index, int)
+                or not isinstance(right_index, int)
+                or right_index != left_index + 1
+                or left_index < 1
+                or right_index > len(segments)
+                or (left_index, right_index) in seen_pairs
+            ):
+                raise ContentGenerationError(
+                    "Adjacent visual-pair review returned invalid or duplicate segment indices."
+                )
+            seen_pairs.add((left_index, right_index))
+
+            description_fields = (
+                "left_visual_action",
+                "right_visual_action",
+                "left_visual_composition",
+                "right_visual_composition",
+            )
+            if any(
+                not isinstance(item.get(field), str) or not item[field].strip()
+                for field in description_fields
+            ):
+                raise ContentGenerationError(
+                    f"Adjacent visual-pair review omitted a non-empty action or composition description for pair {left_index}-{right_index}."
+                )
+
+            boolean_fields = (
+                "narrated_beats_are_distinct",
+                "same_primary_action",
+                "same_primary_composition",
+                "adds_meaningful_difference",
+                "materially_repetitive",
+            )
+            if any(not isinstance(item.get(field), bool) for field in boolean_fields):
+                raise ContentGenerationError(
+                    f"Adjacent visual-pair review omitted a required boolean for pair {left_index}-{right_index}."
+                )
+
+            same_action_and_composition_without_delta = (
+                item["narrated_beats_are_distinct"]
+                and item["same_primary_action"]
+                and item["same_primary_composition"]
+                and not item["adds_meaningful_difference"]
+            )
+            identical_action_description = (
+                _normalize_review_description(item["left_visual_action"])
+                and _normalize_review_description(item["left_visual_action"])
+                == _normalize_review_description(item["right_visual_action"])
+            )
+            identical_composition_description = (
+                _normalize_review_description(item["left_visual_composition"])
+                and _normalize_review_description(item["left_visual_composition"])
+                == _normalize_review_description(item["right_visual_composition"])
+            )
+            repeated_descriptions_without_delta = (
+                item["narrated_beats_are_distinct"]
+                and identical_action_description
+                and identical_composition_description
+                and not item["adds_meaningful_difference"]
+            )
+            # Repetition is meaningful only when the narration moves to a
+            # distinct beat. Do not reject similar imagery for adjacent chunks
+            # that describe the same continuous action or contextual state,
+            # even if the model's raw materially_repetitive flag conflicts.
+            materially_repetitive = (
+                item["narrated_beats_are_distinct"]
+                and (
+                    item["materially_repetitive"]
+                    or same_action_and_composition_without_delta
+                    or repeated_descriptions_without_delta
+                )
+            )
+
+            self.log(
+                f"Visual pair {left_index}-{right_index} audit: "
+                f"left action='{item['left_visual_action']}', "
+                f"right action='{item['right_visual_action']}', "
+                f"left composition='{item['left_visual_composition']}', "
+                f"right composition='{item['right_visual_composition']}', "
+                f"distinct beats={item['narrated_beats_are_distinct']}, "
+                f"same action={item['same_primary_action']}, "
+                f"same composition={item['same_primary_composition']}, "
+                f"meaningful difference={item['adds_meaningful_difference']}, "
+                f"material repetition={materially_repetitive}."
+            )
+
+            if materially_repetitive:
+                issue = str(item.get("issue") or "").strip()
+                if not issue:
+                    issue = (
+                        f"Segment {right_index} substantially repeats the visual action and "
+                        f"composition of segment {left_index}, although the narration moves "
+                        "to a distinct story beat. Show the later segment's own event or stage."
+                    )
+                focus = str(item.get("suggested_focus") or "").strip()
+                if not focus:
+                    focus = (
+                        f"Depict the specific action or stage narrated in segment {right_index}, "
+                        f"visibly distinct from segment {left_index}, without inventing details."
+                    )
+                findings_by_segment[right_index] = {
+                    "segment_index": right_index,
+                    "issue": issue,
+                    "suggested_focus": focus,
+                }
+
+        expected_set = {
+            (index, index + 1)
+            for index in range(1, len(segments))
+        }
+        if seen_pairs != expected_set:
+            raise ContentGenerationError(
+                "Adjacent visual-pair review did not cover every neighboring pair exactly once."
+            )
+
+        return [findings_by_segment[index] for index in sorted(findings_by_segment)]
+
+    def verify_visual_sequence(
+        self,
+        scripture,
+        segments,
+        visuals,
+    ):
+        """Verify every segment's story-beat coverage and the complete sequence."""
+        if len(segments) != len(visuals):
+            raise ContentGenerationError(
+                "Visual sequence review requires exactly one visual per narration segment."
+            )
+
+        prompt = self.build_visual_sequence_review_prompt(
+            scripture,
+            segments,
+            visuals,
+        )
+
+        try:
+            response = self.llm.generate(
+                prompt,
+                response_format=VISUAL_SEQUENCE_VERIFICATION_SCHEMA,
+            )
+        except Exception as error:
+            raise ContentGenerationError(
+                f"Episode-wide visual storytelling review could not run: {error}"
+            ) from error
+
+        try:
+            verdict = self.parse_direction(response)
+        except ContentGenerationError as error:
+            raise ContentGenerationError(
+                "Episode-wide visual storytelling review returned no parseable verdict."
+            ) from error
+
+        if not isinstance(verdict, dict) or not isinstance(verdict.get("passes"), bool):
+            raise ContentGenerationError(
+                "Episode-wide visual storytelling review did not return an explicit boolean verdict."
+            )
+
+        raw_reviews = verdict.get("segment_reviews")
+        if not isinstance(raw_reviews, list) or len(raw_reviews) != len(segments):
+            raise ContentGenerationError(
+                "Episode-wide visual review must assess every segment exactly once."
+            )
+
+        reviews_by_segment = {}
+        for item in raw_reviews:
+            if not isinstance(item, dict):
+                raise ContentGenerationError(
+                    "Episode-wide visual review returned a malformed segment assessment."
+                )
+            segment_number = item.get("segment_index")
+            if (
+                isinstance(segment_number, bool)
+                or not isinstance(segment_number, int)
+                or segment_number < 1
+                or segment_number > len(segments)
+                or segment_number in reviews_by_segment
+            ):
+                raise ContentGenerationError(
+                    "Episode-wide visual review returned a missing, duplicate, or invalid segment index."
+                )
+            if (
+                not isinstance(item.get("beat_is_represented"), bool)
+                or not isinstance(item.get("materially_repetitive"), bool)
+            ):
+                raise ContentGenerationError(
+                    "Episode-wide visual review omitted an explicit beat-coverage or repetition verdict."
+                )
+            if any(
+                not isinstance(item.get(field), str) or not item[field].strip()
+                for field in ("narrated_beat", "depicted_beat")
+            ):
+                raise ContentGenerationError(
+                    f"Episode-wide visual review omitted a meaningful narrated/depicted beat description for segment {segment_number}."
+                )
+            reviews_by_segment[segment_number] = item
+            self.log(
+                f"Episode-wide segment {segment_number} audit: "
+                f"narrated beat='{str(item.get('narrated_beat') or '').strip()}', "
+                f"depicted beat='{str(item.get('depicted_beat') or '').strip()}', "
+                f"represented={item['beat_is_represented']}, "
+                f"materially repetitive={item['materially_repetitive']}."
+            )
+
+        if set(reviews_by_segment) != set(range(1, len(segments) + 1)):
+            raise ContentGenerationError(
+                "Episode-wide visual review did not provide one assessment for every segment."
+            )
+
+        findings_by_segment = {}
+
+        def add_finding(segment_number, issue, suggested_focus=""):
+            normalized_issue = str(issue or "").strip()
+            if not normalized_issue:
+                normalized_issue = (
+                    "The visual does not clearly depict the assigned story beat. "
+                    "Replace it with a scene showing that segment's actual event."
+                )
+            entry = findings_by_segment.setdefault(
+                segment_number,
+                {"issue": [], "suggested_focus": []},
+            )
+            entry["issue"].append(normalized_issue)
+            focus = str(suggested_focus or "").strip()
+            if focus:
+                entry["suggested_focus"].append(focus)
+
+        # The per-segment audit is authoritative for missing beat coverage or
+        # material repetition, even if the top-level reviewer verdict conflicts.
+        for segment_number in range(1, len(segments) + 1):
+            item = reviews_by_segment[segment_number]
+            if not item["beat_is_represented"]:
+                add_finding(
+                    segment_number,
+                    item.get("issue") or (
+                        "The prompt does not actually depict the segment's central narrated event. "
+                        "Show the correct actor performing that event rather than a related pose, "
+                        "prayer, reaction, or distant implication."
+                    ),
+                    item.get("suggested_focus"),
+                )
+            if item["materially_repetitive"]:
+                add_finding(
+                    segment_number,
+                    item.get("issue") or (
+                        "This shot materially repeats an earlier visual without adding a distinct "
+                        "stage or meaningful visual information."
+                    ),
+                    item.get("suggested_focus"),
+                )
+
+        raw_findings = verdict.get("findings")
+        if raw_findings is not None and not isinstance(raw_findings, list):
+            raise ContentGenerationError(
+                "Episode-wide visual review returned malformed findings."
+            )
+        for item in raw_findings or []:
+            if not isinstance(item, dict):
+                raise ContentGenerationError(
+                    "Episode-wide visual review returned a malformed finding."
+                )
+            segment_number = item.get("segment_index")
+            if (
+                isinstance(segment_number, bool)
+                or not isinstance(segment_number, int)
+                or segment_number < 1
+                or segment_number > len(segments)
+            ):
+                raise ContentGenerationError(
+                    "Episode-wide visual review returned an invalid segment index."
+                )
+            add_finding(
+                segment_number,
+                item.get("issue"),
+                item.get("suggested_focus"),
+            )
+
+        # A separate adjacent-pair review is deliberately run even when the
+        # episode-wide reviewer reports a pass. The focused comparison catches
+        # near-duplicate prompts that can be overlooked in a broad sequence audit.
+        pairwise_findings = self.verify_visual_pairs(
+            scripture,
+            segments,
+            visuals,
+        )
+        for item in pairwise_findings:
+            add_finding(
+                item["segment_index"],
+                item["issue"],
+                item.get("suggested_focus", ""),
+            )
+
+        findings = []
+        for segment_number in sorted(findings_by_segment):
+            item = findings_by_segment[segment_number]
+            findings.append({
+                "segment_index": segment_number,
+                "issue": " ".join(dict.fromkeys(item["issue"])),
+                "suggested_focus": " ".join(dict.fromkeys(item["suggested_focus"])),
+            })
+
+        # Concrete per-segment and pairwise findings are actionable and must
+        # trigger targeted regeneration, regardless of the reviewer's overall
+        # flag. Conversely, an overall rejection with no segment-level or
+        # pairwise finding is internally inconsistent: there is nothing the
+        # regeneration loop can target. Do not abort a valid generation for
+        # this contradictory summary flag; rely on the exhaustive detailed
+        # assessments and record the inconsistency for diagnosis.
+        if not findings:
+            if not verdict["passes"]:
+                self.log(
+                    "WARNING: Episode-wide visual reviewer returned passes=false "
+                    "but all per-segment assessments and adjacent-pair checks "
+                    "identified no actionable issue. Accepting the sequence "
+                    "based on the detailed assessments rather than aborting "
+                    "the generation."
+                )
+            return True, []
+
+        return False, findings
 
 
     def build_metadata_prompt(
@@ -1521,17 +2484,43 @@ class ContentGenerator(
             + full_telling
             + "\n\n"
             "TITLE RULES\n"
-            "The title must be clear, factual, and about what this "
-            "passage actually says or does. Write it in plain words.\n"
-            "- Name the event, teaching, saying, or story the passage "
-            "contains, using the passage's own language.\n"
+            "The title must be clear, factual, recognizable, and about what "
+            "this passage actually says or does. Write it in plain words.\n"
+            "- Consider the entire passage before choosing the title. Identify "
+            "its most distinctive event, person or group, and story arc.\n"
+            "- Prefer concrete identifying words: name the relevant person or "
+            "group, the specific action, or the recognizable biblical event "
+            "when the passage makes those details clear. A viewer should be "
+            "able to tell what this episode is about from the title alone.\n"
+            "- Avoid vague titles made only from broad or abstract topic words. "
+            "Do not compress distinct events into generic labels that hide who "
+            "acted or what happened. If two connected story beats are both "
+            "central, name them plainly when that makes the title more useful.\n"
+            "- For narrative passages, prefer a concrete event title that makes "
+            "clear who does what. Do not reduce a passage's central events to "
+            "abstract noun pairs such as a bare combination of themes or actions; "
+            "identify the people or group and the recognizable event instead.\n"
+            "- A title does not need to list every event. Choose the most "
+            "distinctive story event or connected events, but make the wording "
+            "specific enough that a viewer can recognize the passage.\n"
+            "- Keep the title concise, but clarity and recognizability matter "
+            "more than an artificially short length. Use natural, idiomatic "
+            "wording that sounds like a clear description of the episode. When "
+            "the people and their actions are clear, prefer naming them and what "
+            "they do rather than making an incidental location the focus. Avoid "
+            "awkward constructions that make an incidental home or setting sound "
+            "like the main event when the passage is about the people's actions.\n"
+            "- Use the passage's own language where helpful. Common or "
+            "traditional biblical terms for clearly identifiable people, groups, "
+            "and events are acceptable even when the term is not repeated in "
+            "this exact verse range; do not invent a specific identity that "
+            "the passage and its context do not support.\n"
             "- NEVER invent a poetic, symbolic, or literary concept and "
             "attach it to the passage. No metaphors, no invented 'of ...' "
             "pairings, no made-up themes.\n"
             "- NEVER add a theological claim the passage does not state. "
             "Do not assert meaning, promise, or doctrine that is not in "
-            "the quoted text.\n"
-            "- Keep it short: a few words, not a sentence.\n"
+            "the text.\n"
             "- Do NOT include the Scripture reference. It is added to the "
             "title automatically; do not repeat it yourself.\n"
             "Example - the passage below opens Matthew's genealogy of "
@@ -1539,22 +2528,50 @@ class ContentGenerator(
             "A WRONG title is \"Genealogy of Light\", which invents a "
             "symbol the passage never mentions.\n\n"
             "SUMMARY RULES\n"
-            "The summary is one short sentence for the episode listing.\n"
-            "- State plainly what happens or is said in the passage.\n"
+            "Write a concise, natural overview for the episode description, "
+            "based on the entire passage. A summary is not a second narration: "
+            "distill the central story rather than retelling it beat by beat.\n"
+            "- Capture the central event or connected storylines, the key "
+            "participants, and the most meaningful outcome or transition. "
+            "Mention a second storyline when it is essential to understanding "
+            "the passage, but combine related events into an overview instead "
+            "of listing every action in chronological order.\n"
+            "- Keep the summary meaningfully more concise in scope than the "
+            "narration. Usually a compact sentence or short paragraph is enough; "
+            "use additional detail only when the passage genuinely needs it. "
+            "This is a style preference, not a word, character, or sentence-count "
+            "limit. Never expand the summary merely to match the narration's "
+            "length or detail.\n"
+            "- When the passage shifts between different people or groups, "
+            "identify the key action of each group when needed to keep the "
+            "overview accurate. Keep every subject, action, and result "
+            "correctly attributed; never assign one group's actions to "
+            "another.\n"
+            "- Use names, descriptions, and commonly accepted biblical "
+            "terms when the passage and its context clearly identify the "
+            "person or group. Do not invent a specific identity that the "
+            "text and context do not support.\n"
             "- Do NOT repeat or restate the title, and do not reuse the "
             "title's distinctive wording.\n"
             "- Do NOT include the Scripture reference. It is already in "
             "the title.\n"
             "- Do NOT interpret, and do not add any claim the passage does "
             "not state. Report the content; do not explain its theology.\n"
-            "- Keep it short and useful: one sentence, under 25 words.\n\n"
+            "- Include enough context to make the central story understandable, "
+            "but leave secondary details, repeated actions, and step-by-step "
+            "transitions to the narration. Do not reproduce the narration in "
+            "compressed form or restate each sentence. Use as many complete "
+            "sentences as the story genuinely needs, with a clear finished "
+            "ending. There is no fixed length limit, but concision is preferred "
+            "over exhaustive retelling.\n\n"
             "FINAL OUTPUT\n"
             "Return exactly one object with three fields, and nothing "
             "else:\n"
             "- \"title\": a short, clear, factual title, following the "
             "TITLE RULES above. No Scripture reference.\n"
-            "- \"summary\": one short factual sentence, following the "
-            "SUMMARY RULES above. No reference, no interpretation.\n"
+            "- \"summary\": a clear, factual summary of the passage, "
+            "following the SUMMARY RULES above. It may use as many sentences "
+            "as needed. No reference, no unsupported interpretation.\n"
             "- \"mood\": 1-3 lowercase English words for the emotional "
             "tone, used to choose the background music. Choose the style "
             "from the passage: reverent, contemplative, peaceful, solemn, "
@@ -1564,6 +2581,455 @@ class ContentGenerator(
             "Suspense must remain soft and atmospheric, never upbeat or "
             "aggressive.\n"
         )
+
+
+    def build_metadata_verification_prompt(
+        self,
+        scripture,
+        segments,
+        title,
+        summary,
+    ):
+        """Build one independent review of the title and summary as a pair."""
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+        full_telling = "\n".join(
+            f"{position + 1}. {text}"
+            for position, text in enumerate(segments)
+        )
+
+        return (
+            "You are the independent metadata quality reviewer for \""
+            + name
+            + "\". Review the episode title and summary against the complete "
+            "Scripture passage and finished narration. Evaluate the two fields "
+            "separately, while also checking that they complement rather than "
+            "repeat one another. Mood is not part of this review.\n\n"
+            "SCRIPTURE REFERENCE\n"
+            + scripture["reference"]
+            + " ("
+            + scripture["translation"]
+            + ")\n\nSOURCE PASSAGE\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\nFINISHED NARRATION\n"
+            + full_telling
+            + "\n\nPROPOSED TITLE (the code adds the Scripture reference separately)\n"
+            + str(title or "").strip()
+            + "\n\nPROPOSED SUMMARY\n"
+            + str(summary or "").strip()
+            + "\n\nTITLE REVIEW\n"
+            "Set title_passes=true only when the title is accurate to the passage, "
+            "natural and idiomatic in its wording, recognizable and specific enough to tell "
+            "a viewer what the episode is about, and appropriately concise. "
+            "For narrative passages, prefer a concrete event, identifiable "
+            "person/group, or recognizable biblical event over vague abstract "
+            "labels. A title made only of broad topic words is too generic "
+            "when it hides who acts or what specifically happens. The title "
+            "does not need to list every event; it should identify the most "
+            "distinctive central event or connected story. Accept traditional "
+            "biblical terminology supported by the passage and context, "
+            "including terms such as Magi where appropriate. Do not require "
+            "one specific wording or title formula. Also reject clearly awkward "
+            "wording that foregrounds an incidental place instead of the people "
+            "and event, when a more natural subject-action title is available. "
+            "Reject only a material inaccuracy, unsupported claim, or a title "
+            "that is genuinely too vague or unnatural to identify the episode.\n\n"
+            "SUMMARY REVIEW\n"
+            "Set summary_passes=true when the summary is a clear, natural, "
+            "factually supported overview of the passage's central event or "
+            "connected storylines. It should add useful information beyond the "
+            "title, not merely restate it. A summary must be meaningfully more "
+            "concise in scope than the narration: it should distill the story, "
+            "not paraphrase the narration sentence by sentence, replay every "
+            "event in sequence, or reproduce its detailed transitions. Usually "
+            "a compact sentence or short paragraph is enough; use more detail "
+            "when separate central storylines genuinely require it. This is a "
+            "qualitative preference, NOT a word, character, or sentence-count "
+            "limit. Do not reject solely because a useful summary is somewhat "
+            "long, and do not demand arbitrary brevity. It may omit secondary "
+            "actions, details, and long quotations; do not require it to reproduce "
+            "every event or every line of the passage. Check for material "
+            "omissions that make the central story misleading, not ordinary "
+            "compression. Accept valid biblical terminology, including Magi "
+            "where appropriate. Reject unsupported details, theological "
+            "interpretation not stated in the text, or a summary too generic to "
+            "be useful. It must be a complete, coherent description with a "
+            "finished final sentence; reject visibly truncated output or an "
+            "unfinished final clause. Subject/action attribution is evaluated "
+            "separately in summary_attribution_passes.\n\n"
+            "SUMMARY ATTRIBUTION REVIEW (CHECK ONLY CLAIMS THE SUMMARY ACTUALLY MAKES)\n"
+            "Set summary_attribution_passes=false ONLY when the summary clearly "
+            "assigns an action, warning, spoken message, journey, destination, "
+            "or outcome to the wrong person or group. Check the meaning of each "
+            "clause in context, not just its nearest grammatical subject. "
+            "Distinguish the person who receives a message from the person who "
+            "delivers or speaks it: for example, 'Joseph received a message "
+            "from an angel' correctly makes Joseph the recipient and the angel "
+            "the messenger; it does NOT claim Joseph spoke the message. Likewise, "
+            "'the angel warned Joseph to flee' correctly makes the angel the "
+            "speaker and Joseph the recipient of the instruction. Do not treat "
+            "the words inside an embedded quotation as an action performed by "
+            "the grammatical subject of the surrounding clause. For example, "
+            "'Joseph received the angel's message: [quoted instruction]' does "
+            "not attribute the instruction to Joseph. Treat a prophecy or "
+            "fulfillment clause as an outcome/context, not as words spoken by "
+            "the people experiencing that fulfillment. If the summary says a "
+            "family remained in a place, that does not mean the family spoke "
+            "the prophecy associated with the event. Attribute quoted prophetic "
+            "words to the speaker identified by the source only when the summary "
+            "itself makes a claim about who spoke them.\n"
+            "Evaluate only actions and claims actually stated or clearly implied "
+            "by the summary. Do NOT require the summary to list all source "
+            "actions, all source actors, every outcome, or the full wording of "
+            "any quotation; coverage belongs to summary_passes and concise "
+            "summaries necessarily omit details. Do not fail because a source "
+            "action or quotation is absent. If a summary's wording is compressed "
+            "but its intended actor/recipient is clear and supported, pass it. "
+            "Fail only for a clear, material misattribution or unsupported claim. "
+            "When failing, identify the exact phrase, who it appears to assign "
+            "the action to, and who actually performs or receives it according "
+            "to the source.\n\n"
+            "SHARED RULES\n"
+            "Use the whole passage, not only its opening or ending. The source "
+            "passage is authoritative; the narration is a faithful retelling "
+            "that may naturally paraphrase it. Do not demand that metadata "
+            "repeat the source wording. Do not reject reasonable stylistic "
+            "choices, synonymous wording, or accepted biblical terms. Be "
+            "practical rather than perfectionistic: pass a good, accurate, "
+            "useful title or summary. Fail only when there is a clear, "
+            "meaningful problem. The Scripture reference is appended to the "
+            "title by code and should not be included in the proposed title.\n\n"
+            "RETURN exactly one JSON object with six fields: title_passes "
+            "(boolean), title_issues (string), summary_passes (boolean), "
+            "summary_issues (string), summary_attribution_passes (boolean), "
+            "and summary_attribution_issues (string). The attribution verdict "
+            "is a separate mandatory check and must be false whenever any major "
+            "action, actor, group, warning, destination, or outcome is assigned "
+            "to the wrong subject. A summary passes overall only when BOTH "
+            "summary_passes and summary_attribution_passes are true. For a "
+            "passing check, its issues string must be empty. For a failing "
+            "check, explain the specific subject/action error and what a "
+            "correction should accomplish. Judge title and summary separately; "
+            "one may pass while the other fails.\n"
+        )
+
+    def verify_metadata(
+        self,
+        scripture,
+        segments,
+        title,
+        summary,
+    ):
+        """Return independent title and summary verdicts from one review call."""
+        prompt = self.build_metadata_verification_prompt(
+            scripture,
+            segments,
+            title,
+            summary,
+        )
+
+        try:
+            response = self.llm.generate(
+                prompt,
+                response_format=METADATA_VERIFICATION_SCHEMA,
+            )
+        except Exception as error:
+            raise ContentGenerationError(
+                f"Title and summary verification could not run: {error}"
+            ) from error
+
+        try:
+            verdict = self.parse_direction(response)
+        except ContentGenerationError as error:
+            raise ContentGenerationError(
+                f"Title and summary verification returned no parseable verdict: {error}"
+            ) from error
+
+        if (
+            not isinstance(verdict, dict)
+            or not isinstance(verdict.get("title_passes"), bool)
+            or not isinstance(verdict.get("summary_passes"), bool)
+            or not isinstance(verdict.get("summary_attribution_passes"), bool)
+        ):
+            raise ContentGenerationError(
+                "Title and summary verification did not return explicit "
+                "title, summary, and summary-attribution verdicts."
+            )
+
+        title_issues = str(verdict.get("title_issues") or "").strip()
+        summary_issues = str(verdict.get("summary_issues") or "").strip()
+        summary_attribution_issues = str(
+            verdict.get("summary_attribution_issues") or ""
+        ).strip()
+        summary_shape_issue = _summary_completeness_issue(summary)
+
+        if summary_shape_issue:
+            summary_issues = " ".join(
+                part for part in (summary_issues, summary_shape_issue) if part
+            )
+
+        if not verdict["title_passes"] and not title_issues:
+            title_issues = (
+                "The title does not adequately identify the episode. "
+                "Make it more specific and recognizable without adding unsupported details."
+            )
+        if not verdict["summary_passes"] and not summary_issues:
+            summary_issues = (
+                "The summary has a meaningful accuracy, coverage, attribution, "
+                "or usefulness problem; correct it using the complete passage."
+            )
+        if not verdict["summary_attribution_passes"] and not summary_attribution_issues:
+            summary_attribution_issues = (
+                "The summary assigns a major action, warning, destination, or "
+                "outcome to the wrong person or group. Map each action to its "
+                "actual subject in the source and correct the sentence."
+            )
+
+        if not verdict["summary_attribution_passes"]:
+            summary_issues = " ".join(
+                part for part in (summary_issues, summary_attribution_issues) if part
+            )
+
+        return {
+            "title_passes": verdict["title_passes"],
+            "title_issues": title_issues,
+            "summary_passes": (
+                verdict["summary_passes"]
+                and verdict["summary_attribution_passes"]
+                and not summary_shape_issue
+            ),
+            "summary_issues": summary_issues,
+            "summary_attribution_passes": verdict["summary_attribution_passes"],
+            "summary_attribution_issues": summary_attribution_issues,
+        }
+
+    def build_metadata_repair_prompt(
+        self,
+        scripture,
+        segments,
+        title,
+        summary,
+        failed_fields,
+        feedback,
+    ):
+        """Request replacements only for metadata fields that failed review."""
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+        full_telling = "\n".join(
+            f"{position + 1}. {text}"
+            for position, text in enumerate(segments)
+        )
+        failed_fields = set(failed_fields)
+        requested = []
+        if "title" in failed_fields:
+            requested.append(
+                '"title": replace the rejected title with a concise, specific, '
+                "recognizable title grounded in the central event or connected "
+                "story of the entire passage. Identify the people/group or "
+                "recognizable biblical event when useful. Use natural, idiomatic "
+                "wording and avoid making an incidental location the focus when "
+                "the main point is what the people do. Avoid abstract two-topic "
+                "labels that conceal the people or events being described."
+            )
+        if "summary" in failed_fields:
+            requested.append(
+                '"summary": replace the rejected summary with a concise, natural '
+                "overview of the passage's central event or connected storylines. "
+                "Distill the story instead of retelling it beat by beat or "
+                "paraphrasing the narration sentence by sentence. Usually a "
+                "compact sentence or short paragraph is enough; use additional "
+                "detail only when separate central storylines genuinely need it. "
+                "There is no fixed word, character, or sentence-count limit. Do "
+                "not add filler or reproduce long quotations unnecessarily. "
+                "When multiple people or groups take different actions, keep "
+                "each action, warning, speaker, recipient, destination, and outcome "
+                "attached to the correct person or group. Distinguish who delivers "
+                "a message from who receives it. Make the summary add useful "
+                "information beyond the title without repeating it. Ensure the "
+                "final thought is complete and ends cleanly; do not stop mid-clause "
+                "or leave a dangling final word."
+            )
+
+        locked = []
+        if "title" not in failed_fields:
+            locked.append(f"Keep this approved title exactly unchanged: {title}")
+        if "summary" not in failed_fields:
+            locked.append(f"Keep this approved summary exactly unchanged: {summary}")
+
+        return (
+            "You are correcting episode metadata for \""
+            + name
+            + "\" after an independent review found specific problems. "
+            "Correct only the rejected field(s); preserve every approved "
+            "field exactly as instructed.\n\n"
+            "SCRIPTURE REFERENCE\n"
+            + scripture["reference"]
+            + " ("
+            + scripture["translation"]
+            + ")\n\nSOURCE PASSAGE\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\nFINISHED NARRATION\n"
+            + full_telling
+            + "\n\nCURRENT TITLE\n"
+            + str(title or "").strip()
+            + "\n\nCURRENT SUMMARY\n"
+            + str(summary or "").strip()
+            + "\n\nREVIEW FEEDBACK\n"
+            + str(feedback or "").strip()
+            + "\n\nAPPROVED FIELDS - DO NOT CHANGE\n"
+            + ("\n".join(locked) if locked else "No field is currently approved.")
+            + "\n\nFIELDS TO REPAIR\n"
+            + "\n".join(f"- {item}" for item in requested)
+            + "\n\nRULES\n"
+            "Use the entire passage and narration. Be accurate, concrete, and "
+            "natural. Do not invent details, add theological interpretation, "
+            "or include the Scripture reference in the title. Commonly accepted "
+            "biblical terminology, including Magi when appropriate, is valid. "
+            "Do not force the title to list every event. The summary should "
+            "complement the title rather than repeat it, and should be a concise "
+            "overview rather than a compressed retelling of the narration. Capture "
+            "the central event or connected storylines without listing every "
+            "chronological beat. Usually a compact sentence or short paragraph "
+            "is enough; use more detail only when genuinely needed. There is no "
+            "fixed word, character, or sentence-count limit. Ensure it is coherent "
+            "and that its final sentence ends cleanly rather than stopping "
+            "mid-clause. Return only the "
+            "requested field(s) as one JSON object.\n"
+        )
+
+    @staticmethod
+    def build_metadata_repair_schema(failed_fields):
+        """Build a strict response schema containing only fields needing repair."""
+        properties = {}
+        if "title" in failed_fields:
+            properties["title"] = {"type": "string", "maxLength": 90}
+        if "summary" in failed_fields:
+            properties["summary"] = {"type": "string"}
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": list(properties),
+        }
+
+    def generate_metadata(
+        self,
+        scripture,
+        segments,
+    ):
+        """Generate title/summary, independently verify each, and repair failures."""
+        self.log("Generating metadata (title, summary, mood)...")
+        metadata_prompt = self.build_metadata_prompt(
+            scripture,
+            segments,
+        )
+        metadata_response = self.llm.generate(
+            metadata_prompt,
+            response_format=METADATA_SCHEMA,
+        )
+        metadata = self.parse_direction(metadata_response)
+        if not isinstance(metadata, dict):
+            raise ContentGenerationError("Metadata generation returned no usable object.")
+
+        reference = scripture["reference"]
+        title = _strip_reference(
+            str(metadata.get("title") or "").strip(),
+            reference,
+        )
+        summary = _strip_reference(
+            str(metadata.get("summary") or "").strip(),
+            reference,
+        )
+        mood = metadata.get("mood", "")
+
+        review_round = 0
+        while True:
+            review_round += 1
+
+            # Apply the same narrow title/summary de-duplication check before
+            # verification that assemble_content uses when assembling output.
+            # This ensures the reviewer sees the exact summary that can ship;
+            # an almost-verbatim title echo is sent back for repair instead of
+            # being silently replaced after it has passed review.
+            if summary and _restates_title(summary, title, reference):
+                summary = ""
+
+            verdict = self.verify_metadata(
+                scripture,
+                segments,
+                title,
+                summary,
+            )
+
+            title_passes = bool(title) and verdict["title_passes"]
+            summary_passes = bool(summary) and verdict["summary_passes"]
+            title_issues = verdict["title_issues"]
+            summary_issues = verdict["summary_issues"]
+
+            if not title and not title_issues:
+                title_issues = "The generated title was empty. Provide a specific, recognizable title."
+            if not summary and not summary_issues:
+                summary_issues = "The generated summary was empty. Provide a useful factual description of the passage."
+
+            if title_passes and summary_passes:
+                self.log(
+                    f"Title and summary passed metadata verification on round {review_round}."
+                )
+                break
+
+            failed_fields = []
+            feedback = []
+            if not title_passes:
+                failed_fields.append("title")
+                feedback.append("TITLE FAILED: " + title_issues)
+            if not summary_passes:
+                failed_fields.append("summary")
+                feedback.append("SUMMARY FAILED: " + summary_issues)
+
+            self.log(
+                "Metadata verification rejected "
+                + " and ".join(failed_fields)
+                + f" on round {review_round}; repairing only those field(s)..."
+            )
+
+            repair_prompt = self.build_metadata_repair_prompt(
+                scripture,
+                segments,
+                title,
+                summary,
+                failed_fields,
+                "\n".join(feedback),
+            )
+            repair_response = self.llm.generate(
+                repair_prompt,
+                response_format=self.build_metadata_repair_schema(failed_fields),
+            )
+            repaired = self.parse_direction(repair_response)
+            if not isinstance(repaired, dict):
+                raise ContentGenerationError(
+                    "Metadata repair returned no usable JSON object."
+                )
+
+            for field in failed_fields:
+                replacement = _strip_reference(
+                    str(repaired.get(field) or "").strip(),
+                    reference,
+                )
+                if replacement:
+                    if field == "title":
+                        title = replacement
+                    else:
+                        summary = replacement
+                else:
+                    self.log(
+                        f"Metadata repair returned an empty {field}; "
+                        "the field will be reviewed again."
+                    )
+
+        return {
+            "title": title,
+            "summary": summary,
+            "mood": mood,
+        }
 
 
     def parse_direction(
@@ -1735,10 +3201,10 @@ class ContentGenerator(
             reference,
         )
 
-        if not summary or _restates_title(
-            summary,
-            title,
-            reference,
+        if (
+            not summary
+            or _restates_title(summary, title, reference)
+            or _summary_completeness_issue(summary)
         ):
 
             # Fall back to the passage's own opening sentence: factual,
@@ -1894,6 +3360,38 @@ class ContentGenerator(
             )
         )
 
+        # Put the source's actual direct-speech spans in a separate copy
+        # reference. The full passage remains authoritative; this simply makes
+        # exact quotations easier for the writer to reproduce without
+        # accidentally paraphrasing them while rewriting surrounding prose.
+        source_text = str(scripture.get("text") or "").strip()
+        source_quote_spans, _source_quote_problems = _scan_quoted_spans(source_text)
+        outer_source_quotes = [
+            (quoted, start, end)
+            for quoted, start, end in source_quote_spans
+            if not any(
+                other_start < start and other_end > end
+                for _other, other_start, other_end in source_quote_spans
+            )
+        ]
+        source_quotes_section = ""
+        if outer_source_quotes:
+            source_quotes_section = (
+                "VERBATIM SOURCE QUOTATIONS - EXACT COPY REFERENCES\n"
+                "These are the source's quoted speech spans, copied directly "
+                "from the authoritative passage. They are optional to use, "
+                "not a requirement to quote every speech. If you use one as "
+                "direct speech, copy the complete selected sentence(s) exactly "
+                "as shown, preserving every word and its order. Never shorten, "
+                "modernize, or paraphrase wording inside quotation marks. If "
+                "you want to retell only part of a saying, paraphrase that part "
+                "outside quotation marks instead.\n\n"
+                + "\n\n".join(
+                    f"SOURCE QUOTATION {index}:\n{quoted}"
+                    for index, (quoted, _start, _end) in enumerate(outer_source_quotes, 1)
+                )
+            )
+
         prompt = (
             "You are the storyteller for \""
             + name
@@ -1934,10 +3432,22 @@ class ContentGenerator(
             "just to begin with a later or more familiar event. "
             "The result must be a purposeful hybrid, "
             "not a complete read-through and not a paraphrase of every line; "
-            "your job is not to quote it back wholesale.\n"
+            "your job is not to quote it back wholesale. Except for selected "
+            "verbatim quotations, do not follow the source sentence by sentence "
+            "or preserve its wording and syntax mechanically. Build natural "
+            "spoken sentences that connect related actions and carry the listener "
+            "through the events. Keep necessary names, biblical terms, and key "
+            "phrases, but express the surrounding narration in your own clear "
+            "storytelling voice. Do not add drama or details that the passage "
+            "does not establish.\n"
             "When you use a direct quote, copy the complete relevant saying "
             "exactly from source_text. Never omit, replace, add, or paraphrase "
-            "any word inside quotation marks. Keep quotation marks balanced, and "
+            "any word inside quotation marks. Start and end selected quotations "
+            "at complete source-sentence boundaries; never clip a sentence or "
+            "leave out its continuing clause. Apply this with special care to "
+            "Jesus's words. If you cannot reproduce the complete relevant saying "
+            "exactly, narrate it faithfully outside quotation marks. "
+            "Keep quotation marks balanced, and "
             "keep WEBC translator explanations in parentheses outside spoken "
             "quotations. Do not expand contractions or normalize source wording. "
             "Preserve contractions, spelling, and every source word exactly; for "
@@ -1955,9 +3465,9 @@ class ContentGenerator(
             + scripture["translation"]
             + ")\n\n"
             "THE PASSAGE - THE AUTHORITATIVE SOURCE\n"
-            + str(
-                scripture.get("text") or ""
-            ).strip()
+            + source_text
+            + "\n\n"
+            + source_quotes_section
             + "\n\n"
             "NARRATION RULES\n"
             + rules
@@ -2008,12 +3518,18 @@ class ContentGenerator(
         # of resampling the same ones.
         if feedback:
             prompt += (
-                "\n\nYOUR PREVIOUS NARRATION WAS REJECTED\n"
-                "An accuracy check compared your earlier narration "
-                "with the passage and found these problems:\n"
+                "\n\nYOUR PREVIOUS NARRATION WAS REJECTED BY A QUALITY CHECK\n"
+                "Previous versions failed one or more requirements. The issues "
+                "below are cumulative: keep every listed requirement satisfied "
+                "together, even if a later attempt fixed only one of them.\n"
+                "Known problems to avoid reintroducing:\n"
                 + feedback
-                + "\nWrite the telling again, fixing exactly these "
-                "problems while following every rule above.\n"
+                + "\nWrite the complete narration again. Correct the identified "
+                "problems while preserving every material event and meaning, "
+                "keeping direct quotations exact, and telling the passage in "
+                "natural original spoken prose rather than copying its unquoted "
+                "sentences. Do not solve a style issue by omitting important "
+                "content or inventing details.\n"
             )
 
         return prompt
@@ -2090,7 +3606,15 @@ class ContentGenerator(
             "reasonably assign the words or action to the wrong person.\n"
             "- Quotations: is every direct quotation the exact source wording, "
             "complete for the relevant saying, and attributed to the passage's "
-            "own speaker? Check the actual words, not just the meaning.\n"
+            "own speaker? Check the actual words, not just the meaning. An exact "
+            "substring is not sufficient if it clips the beginning, continuing "
+            "clause, condition, reason, or conclusion of the selected saying. "
+            "A complete sentence or a coherent set of complete consecutive "
+            "sentences may be selected from a longer speech when it preserves a "
+            "self-contained saying; do not require unrelated surrounding speech "
+            "or the entire passage to be quoted. Apply this especially carefully "
+            "to Jesus's words: never approve a paraphrase, modernization, or "
+            "shortened fragment presented as His direct words.\n"
             "- Punctuation: are quotation marks balanced and correctly nested? "
             "Accept any consistent straight or curly quote style; do not "
             "reject solely for single-versus-double style.\n"
@@ -2110,6 +3634,116 @@ class ContentGenerator(
             "parsed, and an unparsable reply counts as a rejection.\n"
         )
 
+
+    def build_narration_storytelling_prompt(
+        self,
+        scripture,
+        narration
+    ):
+        """Build a contextual check for natural, original spoken storytelling."""
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+
+        return (
+            "You are the storytelling-quality reviewer for \""
+            + name
+            + "\". The narration has already been checked for biblical "
+            "accuracy, completeness, speaker attribution, and exact quotations. "
+            "Your task is to decide whether it tells the passage naturally and "
+            "engagingly in original spoken prose, rather than reading the source "
+            "back almost word for word.\n\n"
+            "SOURCE PASSAGE\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\nNARRATION TO REVIEW\n"
+            + str(narration or "").strip()
+            + "\n\n"
+            "WHAT GOOD STORYTELLING MEANS\n"
+            "- The listener should hear a connected telling of what happens, "
+            "not a sentence-by-sentence reading of the source with only small "
+            "word substitutions.\n"
+            "- For narrative passages, the unquoted narration should use its own "
+            "natural spoken sentence structure, connect related actions and "
+            "transitions, and guide the listener through the events.\n"
+            "- Preserve the passage's actual sequence, meaning, important "
+            "participants, relationships, causes, and outcomes. Original wording "
+            "must never come at the expense of accuracy or completeness.\n"
+            "- Direct quotations are intentionally verbatim. Do not count quoted "
+            "words against originality and do not ask for valid quotations to "
+            "be paraphrased. The separate quotation check handles their exactness.\n"
+            "- Necessary biblical terms, names, titles, short familiar phrases, "
+            "and wording for which there is no natural alternative are acceptable. "
+            "Some overlap with the source is expected. A small number of ordinary "
+            "event descriptions may naturally resemble the source and are not, by "
+            "themselves, a reason to reject.\n"
+            "- Judge the kind of passage fairly. A genealogy, list, teaching, "
+            "prayer, poem, or series of sayings should not be forced into a "
+            "dramatic story. Preserve names, relationships, teaching, and the "
+            "character of the material while still avoiding an unnecessary "
+            "word-for-word read-through of unquoted prose.\n"
+            "- The delivery should sound clear and natural when read aloud. It "
+            "may be vivid and engaging, but must not manufacture suspense, "
+            "emotions, motives, dialogue, or details that the passage does not "
+            "establish. Do not demand theatrical or sensational language.\n\n"
+            "WHEN TO REJECT\n"
+            "Reject only when the unquoted narration is clearly and substantially "
+            "a source-text read-through: for example, when substantial portions "
+            "of the non-quoted prose repeatedly preserve the source's sentence "
+            "construction and clause-by-clause phrasing with only minor substitutions, "
+            "so the narration as a whole sounds like the source being read aloud "
+            "rather than retold. Also reject when the unquoted writing is so stiff "
+            "or clause-by-clause that it does not function as natural spoken narration.\n"
+            "Do NOT reject based on one isolated sentence, a small number of short "
+            "phrases, or ordinary descriptions of necessary events that naturally "
+            "share wording with the source. To reject, you must identify a sustained "
+            "pattern across substantial unquoted portions of the narration, not just "
+            "cite one or two overlapping phrases. Events may remain in their original "
+            "order, biblical terminology may be retained, and a short passage may "
+            "leave limited room for rewording. Do not use a numerical overlap score, "
+            "percentage, word-count threshold, or requirement that every sentence "
+            "be rewritten. Borderline cases pass.\n\n"
+            "RETURN EXACTLY ONE JSON OBJECT\n"
+            "- passes: true when the narration is a natural, sufficiently original "
+            "telling for this kind of passage; otherwise false.\n"
+            "- issues: when false, identify the sustained pattern across the "
+            "unquoted narration and cite representative substantial portions. "
+            "Do not fail based only on isolated phrases. Ask for more natural spoken "
+            "retelling without dropping content. When true, return an empty string.\n"
+        )
+
+    def verify_narration_storytelling(
+        self,
+        scripture,
+        narration
+    ):
+        """Return (passes, issues) for the independent storytelling-style check."""
+        prompt = self.build_narration_storytelling_prompt(
+            scripture,
+            narration,
+        )
+
+        try:
+            response = self.llm.generate(
+                prompt,
+                response_format=NARRATION_STORYTELLING_SCHEMA,
+            )
+        except Exception as error:
+            raise ContentGenerationError(
+                f"Narration storytelling verification could not run: {error}"
+            ) from error
+
+        try:
+            verdict = self.parse_direction(response)
+        except ContentGenerationError:
+            return False, "The storytelling check returned no parseable verdict."
+
+        if not isinstance(verdict, dict) or not isinstance(verdict.get("passes"), bool):
+            return False, "The storytelling check did not return an explicit boolean verdict."
+
+        if verdict["passes"]:
+            return True, ""
+
+        issues = str(verdict.get("issues") or "").strip()
+        return False, issues or "The unquoted narration reads too much like the source instead of natural storytelling."
 
     def verify_narration_coverage(
         self,
@@ -2240,20 +3874,28 @@ class ContentGenerator(
                 "The accuracy check returned no parseable verdict."
             )
 
-        if verdict.get("accurate") is True:
+        if verdict.get("accurate") is not True:
+            issues = str(
+                verdict.get("issues") or ""
+            ).strip()
 
-            return True, ""
+            if not issues:
+                issues = (
+                    "The narration does not faithfully tell the passage."
+                )
 
-        issues = str(
-            verdict.get("issues") or ""
-        ).strip()
+            return False, issues
 
-        if not issues:
-            issues = (
-                "The narration does not faithfully tell the passage."
+        storytelling_passes, storytelling_issues = self.verify_narration_storytelling(
+            scripture,
+            narration,
+        )
+        if not storytelling_passes:
+            return False, (
+                "STORYTELLING QUALITY: " + storytelling_issues
             )
 
-        return False, issues
+        return True, ""
 
 
     def parse_narration(
@@ -2360,14 +4002,36 @@ class ContentGenerator(
         )
 
         self.log("Writing the narration...")
-        feedback = None
+        # Keep the latest actionable feedback for each failure category across
+        # retries. A new attempt can fix one category while regressing another;
+        # replacing the previous feedback with only the latest rejection caused
+        # the quote/storytelling failures to alternate without converging.
+        feedback_by_category = {}
+
+        def remember_feedback(category, message):
+            cleaned = str(message or "").strip()
+            if cleaned:
+                feedback_by_category[category] = cleaned
+
+        def render_feedback():
+            if not feedback_by_category:
+                return None
+            sections = [
+                "The following requirements have failed in earlier attempts. "
+                "Keep ALL of them satisfied in the next narration; correcting "
+                "one issue must not reintroduce another:"
+            ]
+            for category, message in feedback_by_category.items():
+                sections.append(f"{category}:\n- {message}")
+            return "\n\n".join(sections)
+
         attempt = 0
 
         while True:
             attempt += 1
             prompt = self.build_narration_prompt(
                 scripture,
-                feedback=feedback
+                feedback=render_feedback()
             )
 
             try:
@@ -2383,10 +4047,10 @@ class ContentGenerator(
             try:
                 narration = self.parse_narration(response)
             except ContentGenerationError as error:
-                feedback = (
-                    "The previous narration response was unusable: "
-                    f"{error}. Return a complete JSON object with a non-empty "
-                    "narration field."
+                remember_feedback(
+                    "Response format",
+                    f"The previous narration response was unusable: {error}. "
+                    "Return a complete JSON object with a non-empty narration field.",
                 )
                 self.log(
                     f"Narration attempt {attempt} rejected ({error}) - writing again..."
@@ -2409,11 +4073,17 @@ class ContentGenerator(
                 )
             )
             if deterministic_issues:
-                feedback = (
-                    "DETERMINISTIC NARRATION QUALITY CHECK FAILED:\n"
-                    + "\n".join(deterministic_issues)
-                    + "\nCorrect these exact issues and regenerate the complete narration."
-                )
+                for issue in deterministic_issues:
+                    lowered = issue.lower()
+                    if "only part of a sentence" in lowered or "complete source sentence" in lowered:
+                        category = "Quotation completeness"
+                    elif "direct quotation" in lowered or "quoted" in lowered:
+                        category = "Quotation exactness"
+                    elif "speaker" in lowered or "attribution" in lowered:
+                        category = "Speaker attribution"
+                    else:
+                        category = "Deterministic narration fidelity"
+                    remember_feedback(category, issue)
                 self.log(
                     f"Narration attempt {attempt} rejected ({'; '.join(deterministic_issues)}) - writing again..."
                 )
@@ -2437,10 +4107,178 @@ class ContentGenerator(
                 )
                 return narration
 
+            if str(issues).startswith("STORYTELLING QUALITY:"):
+                remember_feedback(
+                    "Storytelling originality",
+                    str(issues).split(":", 1)[1].strip(),
+                )
+            elif any(
+                marker in str(issues).lower()
+                for marker in ("omits", "omitted", "missing", "incomplete", "coverage")
+            ):
+                remember_feedback("Content completeness", issues)
+            else:
+                remember_feedback("Biblical accuracy", issues)
+
             self.log(
                 f"Narration attempt {attempt} rejected ({issues}) - writing again..."
             )
-            feedback = issues
+
+    def _generate_visual_for_segment(
+        self,
+        scripture,
+        segments,
+        index,
+        prior_visuals=None,
+        verify=True,
+        sequence_feedback=None,
+    ):
+        """Generate one prompt and keep rerolling until its existing checks pass."""
+        rejected_attempts = []
+
+        while True:
+            feedback_parts = []
+            if rejected_attempts:
+                unique_reasons = list(dict.fromkeys(
+                    item["reason"] for item in rejected_attempts
+                ))
+                feedback_parts.append(
+                    "Rejection reasons from previous attempts:\n"
+                    + "\n".join(f"- {reason}" for reason in unique_reasons)
+                    + "\n\nMost recent rejected visual:\n"
+                    + rejected_attempts[-1]["visual"]
+                )
+
+            if sequence_feedback:
+                feedback_parts.append(sequence_feedback)
+
+            feedback = "\n\n".join(feedback_parts)
+            prompt = self.build_segment_prompt(
+                scripture,
+                segments,
+                index,
+                feedback=feedback or None,
+                prior_visuals=prior_visuals or [],
+            )
+
+            response = self.llm.generate(
+                prompt,
+                response_format=VISUAL_SCHEMA
+            )
+
+            try:
+                parsed = self.parse_direction(response)
+            except ContentGenerationError as error:
+                reason = f"The visual response was not valid JSON: {error}"
+                rejected_attempts.append({
+                    "visual": "(unparseable response)",
+                    "reason": reason,
+                })
+                self.log(
+                    f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
+                )
+                continue
+
+            if not isinstance(parsed, dict):
+                parsed = {}
+
+            query = str(parsed.get("search_query") or "").strip()
+            if not query:
+                reason = (
+                    "The visual prompt was empty. Return a complete, specific "
+                    "scene for the assigned narration segment."
+                )
+                rejected_attempts.append({
+                    "visual": "(empty visual prompt)",
+                    "reason": reason,
+                })
+                self.log(
+                    f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
+                )
+                continue
+
+            repetition_issue = visual_repetition_problem(
+                query,
+                prior_visuals or [],
+            )
+            if repetition_issue:
+                rejected_attempts.append({
+                    "visual": query,
+                    "reason": repetition_issue,
+                })
+                self.log(
+                    f"Segment {index + 1}: rejected ({repetition_issue}) - re-rolling..."
+                )
+                continue
+
+            if verify:
+                aligned, reason = self.verify_visual(
+                    scripture,
+                    segments,
+                    index,
+                    query,
+                    prior_visuals=prior_visuals or [],
+                )
+                if not aligned:
+                    rejected_attempts.append({
+                        "visual": query,
+                        "reason": reason,
+                    })
+                    self.log(
+                        f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
+                    )
+                    continue
+
+            self.log(
+                f"Segment {index + 1}: visual approved."
+                if verify else
+                f"Segment {index + 1}: visual generated (verification disabled)."
+            )
+            return parsed
+
+
+    def _build_visual_sequence_revision_feedback(
+        self,
+        target_index,
+        finding,
+        visuals,
+    ):
+        """Give a targeted regeneration the entire current sequence as context."""
+        sequence = []
+        for index, visual in enumerate(visuals):
+            query = (
+                str(visual.get("search_query") or "").strip()
+                if isinstance(visual, dict)
+                else str(visual or "").strip()
+            )
+            label = "REPLACE THIS SEGMENT" if index == target_index else "KEEP THIS SEGMENT"
+            sequence.append(
+                f"Segment {index + 1} [{label}]: {query}"
+            )
+
+        suggested_focus = str(finding.get("suggested_focus") or "").strip()
+        prompt = (
+            "EPISODE-WIDE VISUAL STORYTELLING REVIEW - TARGETED REVISION\n"
+            f"The episode-level reviewer identified a sequence problem in segment {target_index + 1}:\n"
+            f"{finding['issue']}\n"
+        )
+        if suggested_focus:
+            prompt += f"Suggested scripture-consistent alternative focus: {suggested_focus}\n"
+
+        prompt += (
+            "\nCURRENT EPISODE VISUAL SEQUENCE\n"
+            + "\n".join(sequence)
+            + "\n\nCreate a replacement only for the assigned narration segment. "
+            "Make it meaningfully different from the other clips while remaining "
+            "faithful to this segment and the source passage. Do not change the "
+            "other segments. If the narration describes the same continuous "
+            "event as a neighboring clip, use a genuinely different useful "
+            "framing, perspective, focal detail, or stage of that same supported "
+            "event rather than inventing a new action. If no distinct alternative "
+            "is possible, prioritize a faithful, coherent visual over forced variety."
+        )
+        return prompt
+
 
     def generate(
         self,
@@ -2448,7 +4286,7 @@ class ContentGenerator(
         segments,
         narration=None
     ):
-        """Generate and verify one visual per fixed narration segment."""
+        """Generate, individually verify, and review the complete visual sequence."""
         self.log(
             f"Generating {len(segments)} visuals, one per narration segment..."
         )
@@ -2459,119 +4297,65 @@ class ContentGenerator(
 
         visuals = []
         for index, segment in enumerate(segments):
-            rejected_attempts = []
+            parsed = self._generate_visual_for_segment(
+                scripture,
+                segments,
+                index,
+                prior_visuals=visuals,
+                verify=verify,
+            )
+            visuals.append(parsed)
 
+        if verify and visuals:
+            review_round = 0
             while True:
-                feedback = ""
-                if rejected_attempts:
-                    unique_reasons = list(dict.fromkeys(
-                        item["reason"] for item in rejected_attempts
-                    ))
-                    feedback = (
-                        "Rejection reasons from previous attempts:\n"
-                        + "\n".join(
-                            f"- {reason}" for reason in unique_reasons
-                        )
-                        + "\n\nMost recent rejected visual:\n"
-                        + rejected_attempts[-1]["visual"]
-                    )
-
-                prompt = self.build_segment_prompt(
+                review_round += 1
+                self.log(
+                    f"Reviewing the complete visual sequence (round {review_round})..."
+                )
+                sequence_passes, findings = self.verify_visual_sequence(
                     scripture,
                     segments,
-                    index,
-                    feedback=feedback or None,
-                    prior_visuals=visuals,
-                )
-
-                response = self.llm.generate(
-                    prompt,
-                    response_format=VISUAL_SCHEMA
-                )
-
-                try:
-                    parsed = self.parse_direction(response)
-                except ContentGenerationError as error:
-                    reason = f"The visual response was not valid JSON: {error}"
-                    rejected_attempts.append({
-                        "visual": "(unparseable response)",
-                        "reason": reason,
-                    })
-                    self.log(
-                        f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
-                    )
-                    continue
-
-                if not isinstance(parsed, dict):
-                    parsed = {}
-
-                query = str(parsed.get("search_query") or "").strip()
-                if not query:
-                    reason = "The visual prompt was empty. Return a complete, specific scene for the assigned narration segment."
-                    rejected_attempts.append({
-                        "visual": "(empty visual prompt)",
-                        "reason": reason,
-                    })
-                    self.log(
-                        f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
-                    )
-                    continue
-
-                repetition_issue = visual_repetition_problem(
-                    query,
                     visuals,
                 )
-                if repetition_issue:
-                    rejected_attempts.append({
-                        "visual": query,
-                        "reason": repetition_issue,
-                    })
-                    self.log(
-                        f"Segment {index + 1}: rejected ({repetition_issue}) - re-rolling..."
-                    )
-                    continue
 
-                if verify:
-                    aligned, reason = self.verify_visual(
+                if sequence_passes:
+                    self.log(
+                        f"Episode-wide visual storytelling review passed on round {review_round}."
+                    )
+                    break
+
+                finding_details = "; ".join(
+                    f"segment {item['segment_index']}: {item['issue']}"
+                    for item in findings
+                )
+                self.log(
+                    "Episode-wide visual storytelling review flagged "
+                    f"{len(findings)} segment(s). "
+                    + finding_details
+                    + ". Regenerating only those segments..."
+                )
+
+                for finding in findings:
+                    index = finding["segment_index"] - 1
+                    sequence_feedback = self._build_visual_sequence_revision_feedback(
+                        index,
+                        finding,
+                        visuals,
+                    )
+                    visuals[index] = self._generate_visual_for_segment(
                         scripture,
                         segments,
                         index,
-                        query,
-                        prior_visuals=visuals,
+                        prior_visuals=visuals[:index],
+                        verify=verify,
+                        sequence_feedback=sequence_feedback,
                     )
-                    if not aligned:
-                        rejected_attempts.append({
-                            "visual": query,
-                            "reason": reason,
-                        })
-                        self.log(
-                            f"Segment {index + 1}: rejected ({reason}) - re-rolling..."
-                        )
-                        continue
 
-                visuals.append(parsed)
-                self.log(
-                    f"Segment {index + 1}: visual approved."
-                    if verify else
-                    f"Segment {index + 1}: visual generated (verification disabled)."
-                )
-                break
-
-        self.log("Generating metadata (title, summary, mood)...")
-
-        metadata_prompt = self.build_metadata_prompt(
+        metadata = self.generate_metadata(
             scripture,
-            segments
+            segments,
         )
-
-        metadata_response = self.llm.generate(
-            metadata_prompt,
-            response_format=METADATA_SCHEMA
-        )
-
-        metadata = self.parse_direction(metadata_response)
-        if not isinstance(metadata, dict):
-            metadata = {}
 
         direction = {
             "title": metadata.get("title", ""),
@@ -2782,6 +4566,57 @@ def _strip_reference(text, reference):
         value = value[0].upper() + value[1:]
 
     return value
+
+
+def _summary_completeness_issue(summary):
+    """Return a repair reason when a summary is visibly unfinished.
+
+    This is intentionally a conservative structural guard, not a grammar
+    checker. It catches empty/truncated output, missing final sentence-ending
+    punctuation, unbalanced quotation marks, and obvious dangling final words.
+    It does not limit summary length or sentence count. The metadata LLM
+    reviewer remains responsible for meaning and attribution.
+    """
+    value = str(summary or "").strip()
+    if not value:
+        return "The summary is empty. Provide a complete, useful factual summary."
+
+    _spans, quote_problems = _scan_quoted_spans(value)
+    if quote_problems:
+        return (
+            "The summary contains an unfinished or unbalanced quotation. "
+            "Close it properly or remove the incomplete quotation."
+        )
+
+    without_closers = value.rstrip("'\"”’)]}")
+    if not without_closers or without_closers[-1] not in ".!?":
+        return (
+            "The summary appears truncated or unfinished because it does not "
+            "end with sentence punctuation. Finish the summary with a complete "
+            "final sentence or thought."
+        )
+
+    final_word = re.search(
+        r"([A-Za-z]+(?:['’][A-Za-z]+)?)\s*[.!?…]*[\"”’')\]]*$",
+        value,
+    )
+    dangling_words = {
+        "a", "an", "the", "this", "these", "those", "his", "its", "their",
+        "our", "your", "my", "and", "or", "but", "nor", "yet", "so",
+        "while", "although", "because", "if", "when", "unless", "whereas",
+        "to", "of", "for", "with", "from", "by", "into", "onto", "at",
+        "in", "on", "under", "over", "through",
+        "without", "within", "between", "among", "who", "whom", "whose",
+        "which", "that",
+    }
+    if final_word and final_word.group(1).casefold() in dangling_words:
+        return (
+            "The summary ends with the dangling word '"
+            + final_word.group(1)
+            + "'. Complete the unfinished phrase and finish the summary naturally."
+        )
+
+    return ""
 
 
 def _restates_title(summary, title, reference):
