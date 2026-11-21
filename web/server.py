@@ -2710,11 +2710,16 @@ class RequestHandler(
                     )
                 )
 
+                ai_use = bool(
+                    metadata.get("ai_use", False)
+                )
+
                 result = (
                     uploader.upload_short(
                         video_path,
                         metadata,
                         account,
+                        ai_use=ai_use,
                         progress_callback=(
                             _print_upload_progress
                         )
@@ -2831,6 +2836,10 @@ class RequestHandler(
                     ) or ""
                 ).strip()
 
+                ai_use = bool(
+                    data.get("ai_use", False)
+                )
+
                 # Derive the publicly reachable base URL from the
                 # incoming request itself (e.g. a cloudflared/ngrok
                 # tunnel that the user opened the app through), so it
@@ -2934,6 +2943,7 @@ class RequestHandler(
                         caption,
                         resolved_token,
                         resolved_user_id,
+                        ai_use=ai_use,
                         progress_callback=(
                             progress_callback
                         )

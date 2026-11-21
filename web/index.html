@@ -3541,6 +3541,14 @@
         }
 
 
+        .youtube-form-grid-4 {
+
+            grid-template-columns:
+                repeat(4, minmax(0, 1fr));
+
+        }
+
+
         .youtube-field {
 
             display:
@@ -4417,7 +4425,7 @@
                     </div>
 
 
-                    <div class="youtube-form-grid">
+                    <div class="youtube-form-grid youtube-form-grid-4">
 
                         <div class="youtube-field youtube-field-full">
                             <label for="youtubeTitle">Title</label>
@@ -4441,7 +4449,7 @@
                         <div class="youtube-field">
                             <label for="youtubeCategoryId">Category ID</label>
                             <input id="youtubeCategoryId" type="text" placeholder="24" />
-                            <div class="youtube-hint">YouTube category. "24" = Entertainment.</div>
+                            <div class="youtube-hint">YouTube category. "22" = People & Blogs.</div>
                         </div>
 
 
@@ -4452,6 +4460,7 @@
                                 <option value="unlisted">Unlisted</option>
                                 <option value="public">Public</option>
                             </select>
+                            <div class="youtube-hint">Marks the upload as public, unlisted, or private.</div>
                         </div>
 
 
@@ -4461,6 +4470,18 @@
                                 <option value="false">No</option>
                                 <option value="true">Yes</option>
                             </select>
+                            <div class="youtube-hint">Marks the upload as made for kids.</div>
+                        </div>
+
+
+                        <div class="youtube-field">
+                            <label for="youtubeAiUse">AI Use</label>
+                            <select id="youtubeAiUse">
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
+                            <div class="youtube-hint">Marks the upload as containing AI-generated or altered content.
+                            </div>
                         </div>
 
                     </div>
@@ -4585,6 +4606,17 @@
                             <textarea id="instagramCaption" rows="7"></textarea>
                             <div class="youtube-hint">Prefilled with the episode title, summary and hashtags.
                                 Editable before posting.</div>
+                        </div>
+
+
+                        <div class="youtube-field youtube-field-full">
+                            <label for="instagramAiUse">AI Use</label>
+                            <select id="instagramAiUse">
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
+                            <div class="youtube-hint">Marks the upload as containing AI-generated or altered content.
+                            </div>
                         </div>
 
                     </div>
@@ -7815,6 +7847,11 @@
                 made_for_kids:
                     getYoutubeFieldValue(
                         "youtubeMadeForKids"
+                    ) === "true",
+
+                ai_use:
+                    getYoutubeFieldValue(
+                        "youtubeAiUse"
                     ) === "true"
             };
 
@@ -8301,7 +8338,10 @@
                                         },
 
                                         caption:
-                                            document.getElementById("instagramCaption").value.trim()
+                                            document.getElementById("instagramCaption").value.trim(),
+
+                                        ai_use:
+                                            document.getElementById("instagramAiUse").value === "true"
                                     }
                                 )
                         }

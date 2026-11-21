@@ -55,7 +55,8 @@ def upload_short(
     account,
     progress_callback=None,
     chunk_size=DEFAULT_CHUNK_SIZE,
-    timeout=DEFAULT_TIMEOUT
+    timeout=DEFAULT_TIMEOUT,
+    ai_use=False
 ):
 
     """
@@ -98,6 +99,10 @@ def upload_short(
 
     made_for_kids = bool(
         metadata.get("made_for_kids", False)
+    )
+
+    contains_synthetic_media = bool(
+        ai_use
     )
 
     access_token = resolve_access_token(account)
@@ -234,7 +239,8 @@ def _start_upload_session(
         },
         "status": {
             "privacyStatus": privacy_status,
-            "selfDeclaredMadeForKids": made_for_kids
+            "selfDeclaredMadeForKids": made_for_kids,
+            "containsSyntheticMedia": contains_synthetic_media
         }
     })
 

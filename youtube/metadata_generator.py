@@ -225,6 +225,25 @@ def normalize_upload_metadata(
             made_for_kids_value
         )
 
+    ai_use_value = (
+        metadata.get("ai_use", False)
+    )
+
+    if isinstance(ai_use_value, str):
+
+        ai_use = (
+            ai_use_value
+            .strip()
+            .lower()
+            in ("true", "1", "yes", "on")
+        )
+
+    else:
+
+        ai_use = bool(
+            ai_use_value
+        )
+
     return {
         "title": title,
         "description": description,
@@ -233,5 +252,6 @@ def normalize_upload_metadata(
             metadata.get("category_id") or DEFAULT_CATEGORY_ID
         ).strip(),
         "privacy_status": privacy_status,
-        "made_for_kids": made_for_kids
+        "made_for_kids": made_for_kids,
+        "ai_use": ai_use
     }

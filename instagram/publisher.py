@@ -27,7 +27,8 @@ def publish_reel(
     caption,
     access_token,
     ig_user_id,
-    progress_callback=None
+    progress_callback=None,
+    ai_use=None
 ):
     """
     Publishes a publicly reachable video URL to Instagram as a Reel.
