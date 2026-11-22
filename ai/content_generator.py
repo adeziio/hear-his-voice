@@ -183,6 +183,47 @@ METADATA_VERIFICATION_SCHEMA = {
 }
 
 
+# The final whole-episode gate is intentionally conservative. A candidate
+# rejection is never sufficient by itself: every issue must cite text that
+# actually appears in the episode and survive a separate materiality review.
+EPISODE_QUALITY_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "passes": {"type": "boolean"},
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "area": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "material_impact": {"type": "string"},
+                    "required_change": {"type": "string"},
+                },
+                "required": [
+                    "area",
+                    "evidence",
+                    "material_impact",
+                    "required_change",
+                ],
+            },
+        },
+    },
+    "required": ["passes", "issues"],
+}
+
+
+EPISODE_QUALITY_CONFIRMATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "confirmed": {"type": "boolean"},
+        "evidence": {"type": "string"},
+        "materiality_reason": {"type": "string"},
+    },
+    "required": ["confirmed", "evidence", "materiality_reason"],
+}
+
+
 # The narration schema. One field, and it holds the finished telling -
 # the model can return nothing else from this call, so there is no
 # second field for stray Bible text or commentary to hide in.
@@ -973,7 +1014,9 @@ class ContentGenerator(
         3. asks the AI for one SnapGenAI prompt per narration segment,
            each shown the narration immediately before and after it so
            the prompt fits that exact moment of the story,
-        4. asks for a title, summary, and mood.
+        4. asks for a title, summary, and mood,
+        5. reviews the complete episode and regenerates every component
+           when a material defect is independently confirmed.
 
     The passage remains the authority throughout: the narration may
     only restate what the WEBC text says, and content["source_text"]
@@ -2438,7 +2481,8 @@ class ContentGenerator(
     def build_metadata_prompt(
         self,
         scripture,
-        segments
+        segments,
+        episode_feedback=None,
     ):
         """
         Builds the prompt for the episode's title, summary, and mood.
@@ -2457,7 +2501,7 @@ class ContentGenerator(
             for position, text in enumerate(segments)
         )
 
-        return (
+        prompt = (
             "You are the show-runner for \""
             + name
             + "\", a short-form channel that lets Scripture speak "
@@ -2584,6 +2628,19 @@ class ContentGenerator(
             "Suspense must remain soft and atmospheric, never upbeat or "
             "aggressive.\n"
         )
+
+        if episode_feedback:
+            prompt = prompt + (
+                "\n\nCONFIRMED ISSUES FROM THE PREVIOUS COMPLETE EPISODE\n"
+                "The previous full-episode review confirmed the material issue(s) "
+                "below. Correct them where they apply to the title, summary, or "
+                "mood. Do not introduce new claims, make the summary exhaustive, "
+                "or change anything unrelated.\n"
+                + str(episode_feedback).strip()
+                + "\n"
+            )
+
+        return prompt
 
 
     def build_metadata_verification_prompt(
@@ -2920,12 +2977,14 @@ class ContentGenerator(
         self,
         scripture,
         segments,
+        episode_feedback=None,
     ):
         """Generate title/summary, independently verify each, and repair failures."""
         self.log("Generating metadata (title, summary, mood)...")
         metadata_prompt = self.build_metadata_prompt(
             scripture,
             segments,
+            episode_feedback=episode_feedback,
         )
         metadata_response = self.llm.generate(
             metadata_prompt,
@@ -3999,7 +4058,8 @@ class ContentGenerator(
 
     def write_narration(
         self,
-        scripture
+        scripture,
+        episode_feedback=None,
     ):
         """Generate narration and keep rerolling until every enabled check passes."""
         verify = bool(
@@ -4019,15 +4079,23 @@ class ContentGenerator(
                 feedback_by_category[category] = cleaned
 
         def render_feedback():
-            if not feedback_by_category:
+            if not feedback_by_category and not episode_feedback:
                 return None
-            sections = [
-                "The following requirements have failed in earlier attempts. "
-                "Keep ALL of them satisfied in the next narration; correcting "
-                "one issue must not reintroduce another:"
-            ]
+            sections = []
+            if feedback_by_category:
+                sections.append(
+                    "The following requirements have failed in earlier attempts. "
+                    "Keep ALL of them satisfied in the next narration; correcting "
+                    "one issue must not reintroduce another:"
+                )
             for category, message in feedback_by_category.items():
                 sections.append(f"{category}:\n- {message}")
+            if episode_feedback:
+                sections.append(
+                    "Confirmed issue(s) from the previous complete episode "
+                    "(apply only where they genuinely affect the narration):\n"
+                    + str(episode_feedback).strip()
+                )
             return "\n\n".join(sections)
 
         attempt = 0
@@ -4137,6 +4205,7 @@ class ContentGenerator(
         prior_visuals=None,
         verify=True,
         sequence_feedback=None,
+        episode_feedback=None,
     ):
         """Generate one prompt and keep rerolling until its existing checks pass."""
         rejected_attempts = []
@@ -4156,6 +4225,15 @@ class ContentGenerator(
 
             if sequence_feedback:
                 feedback_parts.append(sequence_feedback)
+
+            if episode_feedback:
+                feedback_parts.append(
+                    "CONFIRMED ISSUES FROM THE PREVIOUS COMPLETE EPISODE\n"
+                    "Correct the following only where relevant to this segment. "
+                    "Preserve biblical accuracy and do not force unrelated visual "
+                    "changes merely to satisfy feedback:\n"
+                    + str(episode_feedback).strip()
+                )
 
             feedback = "\n\n".join(feedback_parts)
             prompt = self.build_segment_prompt(
@@ -4285,96 +4363,493 @@ class ContentGenerator(
         return prompt
 
 
+    @staticmethod
+    def _episode_review_evidence_is_grounded(content, evidence, area=None):
+        """Require exact evidence from the generated component being criticized."""
+        evidence_words = _normalize_words(evidence)
+        if len(evidence_words) < 4:
+            return False
+
+        area = str(area or "overall").strip().lower()
+        if area == "narration":
+            relevant_text = [content.get("narration", "")]
+        elif area == "scripture fidelity":
+            relevant_text = [
+                content.get("narration", ""),
+                content.get("title", ""),
+                content.get("summary", ""),
+            ]
+        elif area == "visuals":
+            relevant_text = [
+                visual.get("search_query", "")
+                for visual in content.get("visuals", [])
+                if isinstance(visual, dict)
+            ]
+        elif area == "sequence":
+            relevant_text = [
+                visual.get("search_query", "")
+                for visual in content.get("visuals", [])
+                if isinstance(visual, dict)
+            ]
+        elif area == "metadata":
+            relevant_text = [
+                content.get("title", ""),
+                content.get("summary", ""),
+            ]
+        else:
+            relevant_text = [
+                content.get("title", ""),
+                content.get("summary", ""),
+                content.get("narration", ""),
+                *[
+                    visual.get("search_query", "")
+                    for visual in content.get("visuals", [])
+                    if isinstance(visual, dict)
+                ],
+            ]
+
+        width = len(evidence_words)
+        for text in relevant_text:
+            haystack = _normalize_words(text)
+            if any(
+                haystack[index:index + width] == evidence_words
+                for index in range(len(haystack) - width + 1)
+            ):
+                return True
+        return False
+
+
+    @staticmethod
+    def _format_episode_review_issues(issues, allowed_areas=None):
+        """Format confirmed material findings as focused regeneration feedback."""
+        allowed = set(allowed_areas or [])
+        lines = []
+        for issue in issues:
+            area = str(issue.get("area") or "overall").strip().lower()
+            if allowed and area not in allowed:
+                continue
+            lines.append(
+                f"Area: {area}\n"
+                f"Evidence in the previous episode: {issue['evidence']}\n"
+                f"Material problem: {issue['material_impact']}\n"
+                f"Corrective direction: {issue['required_change']}"
+            )
+        return "\n\n".join(lines) or None
+
+
+    def build_complete_episode_review_prompt(self, scripture, content):
+        """Build a conservative, holistic review of the finished episode."""
+        channel = self.channel_config.get("channel", {})
+        name = str(channel.get("name", "Hear His Voice"))
+        episode_view = {
+            key: value
+            for key, value in content.items()
+            if key != "source_text"
+        }
+        episode_text = json.dumps(episode_view, ensure_ascii=False, indent=2)
+        return (
+            'You are the final whole-episode quality reviewer for "'
+            + name
+            + '". The regular component checks have already run. Your job is NOT '
+            "to search for minor flaws "
+            "or suggest improvements. Decide whether the COMPLETE episode is "
+            "good enough to publish as a faithful, coherent Scripture retelling.\n\n"
+            "AUTHORITATIVE SCRIPTURE (the only authority for biblical facts)\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\nCOMPLETE GENERATED EPISODE\n"
+            + episode_text
+            + "\n\n"
+            "THE DECISION STANDARD - BE VERY CONSERVATIVE\n"
+            "PASS is the default. If the episode is basically sound, coherent, "
+            "faithful, and usable, set passes=true even when you can imagine "
+            "ways to improve it. Borderline cases MUST PASS.\n"
+            "Reject only for a CLEAR, MATERIAL defect that substantially damages "
+            "the episode as a whole, such as: a serious biblical misrepresentation; "
+            "a narration that is genuinely confusing, incoherent, or substantially "
+            "fails to tell the passage; a major central story beat being materially "
+            "misrepresented or absent; or a visual sequence that, considered as a "
+            "whole, is materially disconnected from or contradicts the narrated "
+            "passage. A single unmistakable major defect may be enough; otherwise "
+            "the combined problems must clearly make the episode unfit to publish.\n\n"
+            "WHAT MUST NOT TRIGGER REJECTION\n"
+            "- Minor wording preferences, stylistic taste, or a feeling that the "
+            "episode could be more exciting, polished, dramatic, or concise.\n"
+            "- A reasonable scene-setting inference or harmless detail that does "
+            "not materially change Scripture.\n"
+            "- A visual that depicts only ONE meaningful part of its narration "
+            "segment rather than every detail in that segment.\n"
+            "- Similar shots, repeated settings, or repeated actions when adjacent "
+            "segments continue the same conversation or event. Do not demand "
+            "artificial variety.\n"
+            "- Modest variation in a character's appearance, complexion, clothing, "
+            "age impression, or other physical details between generated takes. "
+            "Perfect character continuity is not required.\n"
+            "- Acceptable artistic interpretation, symbolic/contextual imagery, "
+            "or a visual that is relevant without literally reenacting every word.\n"
+            "- Verbatim Scripture quotations, natural overlap with source wording, "
+            "or a passage whose genre naturally leaves limited room for paraphrase.\n"
+            "- A short, high-level summary that omits secondary details.\n"
+            "- Mood choices or other nonessential presentation preferences.\n\n"
+            "IMPORTANT LIMITATION\n"
+            "You are reviewing the written visual prompts, not rendered video. "
+            "Do not claim to have seen or evaluate the actual generated footage. "
+            "Judge whether the prompts, as a sequence, are materially appropriate.\n\n"
+            "EVIDENCE REQUIRED FOR REJECTION\n"
+            "If passes=false, return only clear material issues. Each issue MUST "
+            "include: (1) area, chosen from scripture fidelity, narration, visuals, "
+            "sequence, metadata, or overall; (2) evidence, a short exact quotation "
+            "copied verbatim from the generated title, summary, narration, or "
+            "visual prompt (not merely from the hidden source_text copy); (3) "
+            "material_impact, explaining specifically why this harms biblical "
+            "faithfulness, comprehension, or the episode as a whole; and (4) "
+            "required_change, describing what a fresh episode must correct. "
+            "Do not invent or paraphrase the evidence quotation. Do not list "
+            "minor issues, optional improvements, or speculative concerns. If you "
+            "cannot cite exact evidence and explain material harm, the issue does "
+            "not qualify and the episode passes.\n\n"
+            "RETURN exactly one JSON object with passes (boolean) and issues "
+            "(array of objects with area, evidence, material_impact, and "
+            "required_change). When passes=true, issues must be an empty array."
+        )
+
+
+    def build_episode_issue_confirmation_prompt(self, scripture, content, issue):
+        """Independently adjudicate one proposed whole-episode rejection."""
+        return (
+            "You are an independent second-stage adjudicator. Another reviewer "
+            "proposed rejecting this episode, but that proposal is NOT presumed "
+            "correct. Your task is to protect good episodes from unnecessary "
+            "whole-episode rerolls. Re-read the Scripture and inspect the actual "
+            "episode evidence yourself.\n\n"
+            "AUTHORITATIVE SCRIPTURE\n"
+            + str(scripture.get("text") or "").strip()
+            + "\n\nCOMPLETE GENERATED EPISODE\n"
+            + json.dumps(
+                {key: value for key, value in content.items() if key != "source_text"},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n\nPROPOSED ISSUE (UNCONFIRMED)\n"
+            + json.dumps(issue, ensure_ascii=False, indent=2)
+            + "\n\n"
+            "Confirm this issue ONLY if it is objectively present in the episode, "
+            "clearly supported by the Scripture or the actual episode content, "
+            "and sufficiently serious to make the complete episode unsuitable "
+            "to publish. The episode must be rerolled only for a genuine material "
+            "problem, not because a different wording or shot might be preferable.\n\n"
+            "Do NOT confirm: harmless scene-setting inference; minor stylistic "
+            "weakness; character appearance variation between clips; a relevant "
+            "visual that depicts only part of a segment; repeated shots for one "
+            "continuous event; reasonable symbolism or artistic interpretation; "
+            "or a subjective preference. If the concern is debatable, overstated, "
+            "not clearly supported, or not materially harmful, set confirmed=false.\n\n"
+            "If confirmed=true, independently quote a short exact phrase from the "
+            "generated episode as evidence and explain the material harm. If you "
+            "cannot support the concern with exact episode evidence, set "
+            "confirmed=false and leave evidence and materiality_reason empty.\n\n"
+            "RETURN exactly one JSON object with confirmed (boolean), evidence "
+            "(string), and materiality_reason (string)."
+        )
+
+
+    def verify_complete_episode(self, scripture, content):
+        """Return (passes, confirmed_issues); uncertain or ungrounded criticism passes."""
+        prompt = self.build_complete_episode_review_prompt(scripture, content)
+        try:
+            response = self.llm.generate(
+                prompt,
+                response_format=EPISODE_QUALITY_REVIEW_SCHEMA,
+            )
+        except Exception as error:
+            raise ContentGenerationError(
+                f"Final whole-episode review could not run: {error}"
+            ) from error
+
+        try:
+            verdict = self.parse_direction(response)
+        except ContentGenerationError as error:
+            self.log(
+                f"WARNING: Final whole-episode review returned an unusable response; "
+                f"accepting the episode rather than risking a false-positive reroll ({error})."
+            )
+            return True, []
+
+        if not isinstance(verdict, dict) or not isinstance(verdict.get("passes"), bool):
+            self.log(
+                "WARNING: Final whole-episode review omitted an explicit verdict; "
+                "accepting the episode rather than risking a false-positive reroll."
+            )
+            return True, []
+
+        if verdict["passes"] is True:
+            return True, []
+
+        proposed = verdict.get("issues")
+        if not isinstance(proposed, list) or not proposed:
+            self.log(
+                "WARNING: Final whole-episode reviewer rejected without any "
+                "specific issue; accepting the episode rather than rerolling."
+            )
+            return True, []
+
+        grounded_issues = []
+        valid_areas = {
+            "scripture fidelity", "narration", "visuals", "sequence", "metadata", "overall"
+        }
+        for item in proposed:
+            if not isinstance(item, dict):
+                continue
+            area = str(item.get("area") or "").strip().lower()
+            evidence = str(item.get("evidence") or "").strip()
+            impact = str(item.get("material_impact") or "").strip()
+            required_change = str(item.get("required_change") or "").strip()
+            if (
+                area not in valid_areas
+                or not evidence
+                or not impact
+                or not required_change
+                or not self._episode_review_evidence_is_grounded(content, evidence, area)
+            ):
+                continue
+            grounded_issues.append({
+                "area": area,
+                "evidence": evidence,
+                "material_impact": impact,
+                "required_change": required_change,
+            })
+
+        if not grounded_issues:
+            self.log(
+                "WARNING: Final whole-episode reviewer supplied no fully grounded, "
+                "actionable issue; accepting the episode rather than rerolling."
+            )
+            return True, []
+
+        confirmed_issues = []
+        for issue in grounded_issues:
+            confirmation_prompt = self.build_episode_issue_confirmation_prompt(
+                scripture,
+                content,
+                issue,
+            )
+            try:
+                confirmation_response = self.llm.generate(
+                    confirmation_prompt,
+                    response_format=EPISODE_QUALITY_CONFIRMATION_SCHEMA,
+                )
+            except Exception as error:
+                raise ContentGenerationError(
+                    f"Final episode-issue confirmation could not run: {error}"
+                ) from error
+
+            try:
+                confirmation = self.parse_direction(confirmation_response)
+            except ContentGenerationError:
+                self.log(
+                    "WARNING: A proposed whole-episode issue could not be independently "
+                    "confirmed; it will not trigger a reroll."
+                )
+                continue
+
+            if not isinstance(confirmation, dict) or confirmation.get("confirmed") is not True:
+                continue
+
+            confirmation_evidence = str(confirmation.get("evidence") or "").strip()
+            materiality_reason = str(
+                confirmation.get("materiality_reason") or ""
+            ).strip()
+            if (
+                not materiality_reason
+                or not self._episode_review_evidence_is_grounded(
+                    content,
+                    confirmation_evidence,
+                    issue["area"],
+                )
+            ):
+                self.log(
+                    "WARNING: A proposed whole-episode issue lacked grounded "
+                    "confirmation evidence; it will not trigger a reroll."
+                )
+                continue
+
+            confirmed = dict(issue)
+            confirmed["confirmation_evidence"] = confirmation_evidence
+            confirmed["confirmed_materiality_reason"] = materiality_reason
+            confirmed_issues.append(confirmed)
+
+        if not confirmed_issues:
+            self.log(
+                "Final whole-episode concern(s) were not independently confirmed; "
+                "accepting the episode to avoid a false-positive reroll."
+            )
+            return True, []
+
+        return False, confirmed_issues
+
+
     def generate(
         self,
         scripture,
         segments,
         narration=None
     ):
-        """Generate, individually verify, and review the complete visual sequence."""
-        self.log(
-            f"Generating {len(segments)} visuals, one per narration segment..."
-        )
+        """Generate a complete episode and reroll all components after a confirmed material failure."""
+        current_narration = str(narration or "").strip()
+        current_segments = list(segments or [])
+        if not current_narration:
+            current_narration = self.write_narration(scripture)
+            current_segments = self.build_segments(current_narration)
 
-        verify = bool(
+        verify_visuals = bool(
             self.generation_config.get("verify_visuals", True)
         )
-
-        visuals = []
-        for index, segment in enumerate(segments):
-            parsed = self._generate_visual_for_segment(
-                scripture,
-                segments,
-                index,
-                prior_visuals=visuals,
-                verify=verify,
-            )
-            visuals.append(parsed)
-
-        if verify and visuals:
-            review_round = 0
-            while True:
-                review_round += 1
-                self.log(
-                    f"Reviewing the complete visual sequence (round {review_round})..."
-                )
-                sequence_passes, findings = self.verify_visual_sequence(
-                    scripture,
-                    segments,
-                    visuals,
-                )
-
-                if sequence_passes:
-                    self.log(
-                        f"Episode-wide visual storytelling review passed on round {review_round}."
-                    )
-                    break
-
-                finding_details = "; ".join(
-                    f"segment {item['segment_index']}: {item['issue']}"
-                    for item in findings
-                )
-                self.log(
-                    "Episode-wide visual storytelling review flagged "
-                    f"{len(findings)} segment(s). "
-                    + finding_details
-                    + ". Regenerating only those segments..."
-                )
-
-                for finding in findings:
-                    index = finding["segment_index"] - 1
-                    sequence_feedback = self._build_visual_sequence_revision_feedback(
-                        index,
-                        finding,
-                        visuals,
-                    )
-                    visuals[index] = self._generate_visual_for_segment(
-                        scripture,
-                        segments,
-                        index,
-                        prior_visuals=visuals[:index],
-                        verify=verify,
-                        sequence_feedback=sequence_feedback,
-                    )
-
-        metadata = self.generate_metadata(
-            scripture,
-            segments,
+        verify_complete_episode = bool(
+            self.generation_config.get("verify_complete_episode", True)
         )
 
-        direction = {
-            "title": metadata.get("title", ""),
-            "summary": metadata.get("summary", ""),
-            "mood": metadata.get("mood", ""),
-            "visuals": visuals,
+        episode_attempt = 0
+        confirmed_feedback = {
+            "narration": None,
+            "visuals": None,
+            "metadata": None,
         }
 
-        return self.assemble_content(
-            scripture,
-            segments,
-            direction,
-            narration
-        )
+        while True:
+            episode_attempt += 1
+            self.log(
+                f"Generating complete episode attempt {episode_attempt} "
+                f"({len(current_segments)} narration segments)..."
+            )
+
+            visuals = []
+            for index, segment in enumerate(current_segments):
+                parsed = self._generate_visual_for_segment(
+                    scripture,
+                    current_segments,
+                    index,
+                    prior_visuals=visuals,
+                    verify=verify_visuals,
+                    episode_feedback=confirmed_feedback["visuals"],
+                )
+                visuals.append(parsed)
+
+            if verify_visuals and visuals:
+                review_round = 0
+                while True:
+                    review_round += 1
+                    self.log(
+                        f"Reviewing the complete visual sequence (round {review_round})..."
+                    )
+                    sequence_passes, findings = self.verify_visual_sequence(
+                        scripture,
+                        current_segments,
+                        visuals,
+                    )
+
+                    if sequence_passes:
+                        self.log(
+                            f"Episode-wide visual storytelling review passed on round {review_round}."
+                        )
+                        break
+
+                    finding_details = "; ".join(
+                        f"segment {item['segment_index']}: {item['issue']}"
+                        for item in findings
+                    )
+                    self.log(
+                        "Episode-wide visual storytelling review flagged "
+                        f"{len(findings)} segment(s). "
+                        + finding_details
+                        + ". Regenerating only those segments..."
+                    )
+
+                    for finding in findings:
+                        index = finding["segment_index"] - 1
+                        sequence_feedback = self._build_visual_sequence_revision_feedback(
+                            index,
+                            finding,
+                            visuals,
+                        )
+                        visuals[index] = self._generate_visual_for_segment(
+                            scripture,
+                            current_segments,
+                            index,
+                            prior_visuals=visuals[:index],
+                            verify=verify_visuals,
+                            sequence_feedback=sequence_feedback,
+                            episode_feedback=confirmed_feedback["visuals"],
+                        )
+
+            metadata = self.generate_metadata(
+                scripture,
+                current_segments,
+                episode_feedback=confirmed_feedback["metadata"],
+            )
+
+            direction = {
+                "title": metadata.get("title", ""),
+                "summary": metadata.get("summary", ""),
+                "mood": metadata.get("mood", ""),
+                "visuals": visuals,
+            }
+
+            content = self.assemble_content(
+                scripture,
+                current_segments,
+                direction,
+                current_narration,
+            )
+
+            if not verify_complete_episode:
+                self.log("Final whole-episode review is disabled; returning the individually validated episode.")
+                return content
+
+            self.log("Performing conservative final whole-episode quality review...")
+            episode_passes, confirmed_issues = self.verify_complete_episode(
+                scripture,
+                content,
+            )
+            if episode_passes:
+                self.log(
+                    f"Complete episode passed final quality review on attempt {episode_attempt}."
+                )
+                return content
+
+            issue_details = []
+            for issue in confirmed_issues:
+                issue_details.append(
+                    f"[{issue['area']}] {issue['material_impact']} "
+                    f"Evidence: {issue['evidence']}"
+                )
+            self.log(
+                "Final whole-episode review CONFIRMED material defect(s): "
+                + " | ".join(issue_details)
+                + ". Regenerating the entire episode..."
+            )
+
+            # A whole-episode rejection starts a genuinely fresh episode:
+            # narration, segmentation, every visual, and metadata are all
+            # regenerated. Only relevant, independently confirmed feedback
+            # is carried into each component's next generation prompt.
+            confirmed_feedback = {
+                "narration": self._format_episode_review_issues(
+                    confirmed_issues,
+                    {"scripture fidelity", "narration", "overall"},
+                ),
+                "visuals": self._format_episode_review_issues(
+                    confirmed_issues,
+                    {"scripture fidelity", "visuals", "sequence", "overall"},
+                ),
+                "metadata": self._format_episode_review_issues(
+                    confirmed_issues,
+                    {"scripture fidelity", "metadata", "overall"},
+                ),
+            }
+            current_narration = self.write_narration(
+                scripture,
+                episode_feedback=confirmed_feedback["narration"],
+            )
+            current_segments = self.build_segments(current_narration)
 
 
 def _clean_narration(text):
