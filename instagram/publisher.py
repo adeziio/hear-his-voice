@@ -75,6 +75,7 @@ def publish_reel(
             "video_url": video_url,
             "caption": caption or "",
             "share_to_feed": "true",
+            "ai_use": "true" if ai_use else "false",
             "access_token": access_token
         },
         timeout=60

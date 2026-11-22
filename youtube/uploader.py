@@ -121,6 +121,7 @@ def upload_short(
         category_id,
         privacy_status,
         made_for_kids,
+        contains_synthetic_media,
         file_size,
         timeout
     )
@@ -221,6 +222,7 @@ def _start_upload_session(
     category_id,
     privacy_status,
     made_for_kids,
+    contains_synthetic_media,
     file_size,
     timeout
 ):
