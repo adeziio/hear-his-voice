@@ -1963,6 +1963,27 @@ class RequestHandler(
 
         return
 
+    def handle(
+        self
+    ):
+
+        try:
+
+            super().handle()
+
+        except (
+            ConnectionResetError,
+            BrokenPipeError,
+            ConnectionAbortedError
+        ):
+
+            # Client closed the connection mid-request (e.g. closed the
+            # browser tab or the network dropped). This is expected and
+            # harmless; suppress it so it does not clog the logs with a
+            # full traceback on every disconnect.
+
+            pass
+
     def send_json(
         self,
         data,
