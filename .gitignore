@@ -85,7 +85,19 @@ huggingface/
 # Generated Media
 # ==================================
 
-media/
+media/*
+
+# Allow only content.json and prompt.txt inside each shorts episode
+!media/output/
+media/output/*
+!media/output/shorts/
+media/output/shorts/*
+!media/output/shorts/*/
+
+media/output/shorts/*/*
+
+!media/output/shorts/*/content.json
+!media/output/shorts/*/prompt.txt
 
 
 # ==================================
