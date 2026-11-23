@@ -30,20 +30,6 @@ class CompositionError(
     pass
 
 
-FONT_CANDIDATES = [
-    # Segoe UI Semibold is the closest standard Windows equivalent to
-    # Inter SemiBold (600) when Inter is not installed.
-    "C:/Windows/Fonts/seguisb.ttf",
-    "C:/Windows/Fonts/Inter-SemiBold.ttf",
-    "C:/Windows/Fonts/Inter_600.ttf",
-    "C:/Windows/Fonts/arialbd.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    "/System/Library/Fonts/Supplemental/Arial.ttf"
-]
-
 # Footage groups are consumed clip-by-clip at their natural duration;
 # no clip is ever looped to fill time.
 
@@ -1223,10 +1209,6 @@ class Composer:
             candidates.append(
                 configured
             )
-
-        candidates.extend(
-            FONT_CANDIDATES
-        )
 
         for candidate in candidates:
 

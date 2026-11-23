@@ -100,9 +100,20 @@ def restore_narration_word_text(words, narration_text=None):
 
 
 def _word_key(value):
+    """Normalise a word for matching timed edge-tts tokens to source text.
+
+    Single curly quotes (’ ‘) and double curly quotes (” “) are normalised
+    to their straight counterparts *before* punctuation is stripped, so the
+    matching key is symmetric regardless of whether the quote mark is curly
+    or straight. Without this, double curly quotes were only silently removed
+    by the regex while single curly quotes were explicitly replaced — an
+    asymmetry that could cause a timed word to fail matching its source
+    token and lose its quotation mark in the rendered caption.
+    """
     value = str(value).replace("’", "'").replace("‘", "'")
-    value = re.sub(r"[^\w']", "", value, flags=re.UNICODE)
-    return value.strip("'").casefold()
+    value = value.replace("”", '"').replace("“", '"')
+    value = re.sub(r"[^\w'\"]", "", value, flags=re.UNICODE)
+    return value.strip("'\"").casefold()
 
 
 def _ends_sentence(value):
