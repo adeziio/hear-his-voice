@@ -282,6 +282,9 @@ VISUAL_PAIRWISE_VERIFICATION_SCHEMA = {
                     "narrated_beats_are_distinct": {"type": "boolean"},
                     "same_primary_action": {"type": "boolean"},
                     "same_primary_composition": {"type": "boolean"},
+                    "same_primary_visual_template": {"type": "boolean"},
+                    "camera_composition_changes": {"type": "boolean"},
+                    "differences_only_setting_or_background": {"type": "boolean"},
                     "adds_meaningful_difference": {"type": "boolean"},
                     "materially_repetitive": {"type": "boolean"},
                     "issue": {"type": "string"},
@@ -297,6 +300,9 @@ VISUAL_PAIRWISE_VERIFICATION_SCHEMA = {
                     "narrated_beats_are_distinct",
                     "same_primary_action",
                     "same_primary_composition",
+                    "same_primary_visual_template",
+                    "camera_composition_changes",
+                    "differences_only_setting_or_background",
                     "adds_meaningful_difference",
                     "materially_repetitive",
                     "issue",
@@ -456,6 +462,191 @@ def _normalize_words(text):
         r"[a-z0-9]+",
         str(text or "").lower()
     )
+
+
+def normalize_typographic_punctuation(text):
+    """Use curly apostrophes and quotation marks in generated display text.
+
+    Straight ASCII quote delimiters are converted to typographic opening and
+    closing marks. Apostrophes in contractions and possessives become U+2019.
+    Existing curly marks are retained. Apply this only to generated episode
+    fields; the authoritative ``source_text`` is deliberately left untouched.
+    """
+    value = str(text or "")
+    if not value:
+        return value
+
+    output = []
+    quote_stack = []
+
+    def is_word(char):
+        return bool(char) and char.isalnum()
+
+    def opening_context(index):
+        previous = value[index - 1] if index else ""
+        following = value[index + 1] if index + 1 < len(value) else ""
+        return (
+            (not previous or previous.isspace() or previous in "([{—–:;,.!?")
+            and bool(following)
+            and not following.isspace()
+        )
+
+    def future_single_delimiters(index):
+        """Count later standalone single marks, ignoring word apostrophes."""
+        count = 0
+        for future_index in range(index + 1, len(value)):
+            char = value[future_index]
+            if char not in ("'", "’"):
+                continue
+            previous = value[future_index - 1] if future_index else ""
+            following = (
+                value[future_index + 1]
+                if future_index + 1 < len(value) else ""
+            )
+            if is_word(previous) and is_word(following):
+                continue
+            count += 1
+        return count
+
+    for index, char in enumerate(value):
+        previous = value[index - 1] if index else ""
+        following = value[index + 1] if index + 1 < len(value) else ""
+
+        if char == '"':
+            if quote_stack and quote_stack[-1] == "double":
+                output.append("”")
+                quote_stack.pop()
+            else:
+                output.append("“")
+                quote_stack.append("double")
+            continue
+
+        if char == "“":
+            output.append(char)
+            quote_stack.append("double")
+            continue
+
+        if char == "”":
+            output.append(char)
+            if quote_stack and quote_stack[-1] == "double":
+                quote_stack.pop()
+            continue
+
+        if char == "‘":
+            output.append(char)
+            quote_stack.append("single")
+            continue
+
+        if char in ("'", "’"):
+            # Internal word marks are contractions or possessives.
+            if is_word(previous) and is_word(following):
+                output.append("’")
+                continue
+
+            if quote_stack and quote_stack[-1] == "single":
+                # Preserve a possessive apostrophe inside a quoted phrase,
+                # e.g. ‘Jesus’ mother’, when the final closer still follows.
+                if (
+                    is_word(previous)
+                    and following.isspace()
+                    and future_single_delimiters(index) == 1
+                ):
+                    output.append("’")
+                else:
+                    output.append("’")
+                    quote_stack.pop()
+                continue
+
+            # A trailing mark after a word outside a quoted span is possessive.
+            if is_word(previous):
+                output.append("’")
+                continue
+
+            if opening_context(index):
+                output.append("‘")
+                quote_stack.append("single")
+            else:
+                output.append("’")
+            continue
+
+        output.append(char)
+
+    return "".join(output)
+
+
+def repair_quote_spacing_and_terminal_punctuation(text):
+    """Repair mechanical errors immediately outside balanced quote delimiters.
+
+    Source quotation placeholders preserve WEBC wording and punctuation, but
+    the model can append a redundant sentence stop after the inserted quote,
+    or a nested closing mark can be attached to the next word (for example
+    ``;’or``). This helper removes only the redundant outside mark and adds
+    only the missing separator. It never changes quoted words or punctuation.
+    """
+    value = str(text or "")
+    spans, _problems = _scan_quoted_spans(value)
+    closing_positions = sorted(
+        {end for _quoted, _start, end in spans},
+        reverse=True,
+    )
+
+    for close_index in closing_positions:
+        if close_index >= len(value):
+            continue
+
+        # A terminal mark already inside the quotation makes an immediately
+        # following sentence mark redundant. Preserve the source punctuation.
+        if close_index > 0 and value[close_index - 1] in ".?!":
+            extra_index = close_index + 1
+            if (
+                extra_index < len(value)
+                and value[extra_index] in ".?!"
+                and (
+                    extra_index + 1 == len(value)
+                    or value[extra_index + 1].isspace()
+                )
+            ):
+                value = value[:extra_index] + value[extra_index + 1:]
+
+        # A closing quote must be separated from the next word. This repairs
+        # source-edition spacing such as ;’or without touching either word.
+        next_index = close_index + 1
+        if next_index < len(value) and value[next_index].isalnum():
+            value = value[:next_index] + " " + value[next_index:]
+
+    return value
+
+
+def normalize_generated_content_fields(content):
+    """Normalize generated display text while preserving source_text exactly."""
+    if not isinstance(content, dict):
+        return content
+
+    normalized = dict(content)
+    for field in ("title", "summary", "narration"):
+        value = normalized.get(field)
+        if isinstance(value, str):
+            value = normalize_typographic_punctuation(value)
+            if field == "narration":
+                value = repair_quote_spacing_and_terminal_punctuation(value)
+            normalized[field] = value
+
+    visuals = normalized.get("visuals")
+    if isinstance(visuals, list):
+        normalized_visuals = []
+        for visual in visuals:
+            if not isinstance(visual, dict):
+                normalized_visuals.append(visual)
+                continue
+            item = dict(visual)
+            for field in ("search_query", "sentence"):
+                value = item.get(field)
+                if isinstance(value, str):
+                    item[field] = normalize_typographic_punctuation(value)
+            normalized_visuals.append(item)
+        normalized["visuals"] = normalized_visuals
+
+    return normalized
 
 
 def _name_key(word):
@@ -802,6 +993,80 @@ def narration_quote_completeness_problems(source_text, narration):
     return problems
 
 
+def _quote_family(opening, closing):
+    """Return the source quotation family: double or single."""
+    if opening in ("“", '"') and closing in ("”", '"'):
+        return "double"
+    if opening in ("‘", "'") and closing in ("’", "'"):
+        return "single"
+    return None
+
+
+def narration_quote_style_problems(source_text, narration):
+    """Require narration quotations to mirror source single/double nesting.
+
+    Source double quotations are rendered with curly double marks in narration;
+    embedded source single quotations retain curly single marks. This validates
+    typography only and never changes or relaxes the spoken-word checks.
+    """
+    source = str(source_text or "")
+    spoken = str(narration or "")
+    source_spans, _ = _scan_quoted_spans(source)
+    narration_spans, _ = _scan_quoted_spans(spoken)
+    if not source_spans or not narration_spans:
+        return []
+
+    source_quote_records = []
+    for quoted_text, start, end in source_spans:
+        if start <= 0 or end >= len(source):
+            continue
+        family = _quote_family(source[start - 1], source[end])
+        if family:
+            source_quote_records.append((quoted_text, family))
+
+    problems = []
+    for quoted_text, start, end in narration_spans:
+        if start <= 0 or end >= len(spoken):
+            continue
+        quoted_words = _normalize_words(quoted_text)
+        if not quoted_words:
+            continue
+
+        # Match to the smallest source quote containing this exact consecutive
+        # word sequence, which naturally distinguishes outer and nested quotes.
+        candidates = []
+        for source_quote, family in source_quote_records:
+            source_words = _normalize_words(source_quote)
+            width = len(quoted_words)
+            if width and any(
+                source_words[index:index + width] == quoted_words
+                for index in range(len(source_words) - width + 1)
+            ):
+                candidates.append((len(source_words), family))
+        if not candidates:
+            continue
+
+        candidates.sort(key=lambda item: item[0])
+        expected_family = candidates[0][1]
+        expected_pair = ("“", "”") if expected_family == "double" else ("‘", "’")
+        actual_pair = (spoken[start - 1], spoken[end])
+        if actual_pair != expected_pair:
+            excerpt = " ".join(quoted_text.split())
+            if len(excerpt) > 90:
+                excerpt = excerpt[:87] + "..."
+            expected_label = (
+                "curly double quotation marks “…”"
+                if expected_family == "double"
+                else "curly single quotation marks ‘…’"
+            )
+            problems.append(
+                f'Quotation formatting for "{excerpt}" does not match the source. '
+                f"Use {expected_label}, preserving the source's double-versus-single "
+                "quotation level. Do not change any quoted words."
+            )
+    return problems
+
+
 def narration_quote_problems(source_text, narration):
     """Reject unbalanced quotes and quoted words that are not source-exact.
 
@@ -911,8 +1176,75 @@ def _visual_similarity_tokens(value):
     ]
 
 
+_VISUAL_COMPOSITION_CUE_PATTERNS = {
+    "shot_distance": (
+        ("extreme close-up", r"\bextreme\s+close[- ]?up\b"),
+        ("medium close-up", r"\bmedium\s+close[- ]?up\b"),
+        ("medium wide shot", r"\bmedium[- ]wide\s+shot\b"),
+        ("close-up", r"\bclose[- ]?up\b"),
+        ("wide shot", r"\bwide\s+shot\b|\blong\s+shot\b|\bwide\s+view\b"),
+        ("medium shot", r"\bmedium\s+shot\b"),
+        ("establishing shot", r"\bestablishing\s+shot\b"),
+        ("detail shot", r"\bdetail\s+shot\b|\binsert\s+shot\b"),
+    ),
+    "camera_angle": (
+        ("high angle", r"\bhigh[- ]angle\b|\bfrom\s+above\b"),
+        ("low angle", r"\blow[- ]angle\b|\bfrom\s+below\b"),
+        ("eye level", r"\beye[- ]level\b"),
+        ("overhead", r"\boverhead\b|\btop[- ]down\b|\bbird['’]?s[- ]eye\b"),
+        ("ground level", r"\bground[- ]level\b|\bworm['’]?s[- ]eye\b"),
+    ),
+    "viewpoint": (
+        ("over the shoulder", r"\bover[- ]the[- ]shoulder\b|\bover\s+the\s+shoulder\b"),
+        ("reverse angle", r"\breverse\s+(?:angle|shot)\b"),
+        ("side profile", r"\bside[- ]profile\b|\bprofile\s+view\b|\bside[- ]on\b|\bside\s+view\b"),
+        ("from behind", r"\bfrom\s+behind\b|\brear\s+view\b|\bbehind[- ]the[- ]subject\b"),
+        ("three-quarter view", r"\bthree[- ]quarter\s+(?:view|angle)\b"),
+        ("front view", r"\bfront[- ]facing\b|\bfrontal\s+view\b|\bhead[- ]on\b"),
+    ),
+}
+
+
+def _visual_composition_cues(value):
+    """Extract explicit shot-size, angle, and viewpoint cues from a prompt."""
+    text = re.sub(r"\s+", " ", str(value or "").lower())
+    cues = {}
+    for category, patterns in _VISUAL_COMPOSITION_CUE_PATTERNS.items():
+        candidates = []
+        for label, pattern in patterns:
+            candidates.extend(
+                (match.start(), match.end(), label)
+                for match in re.finditer(pattern, text)
+            )
+        # Prefer the most specific/longest match so "medium close-up" is
+        # not also interpreted as a generic "close-up" cue.
+        selected = []
+        for start, end, label in sorted(
+            candidates,
+            key=lambda item: (-(item[1] - item[0]), item[0]),
+        ):
+            if any(start < used_end and end > used_start for used_start, used_end, _ in selected):
+                continue
+            selected.append((start, end, label))
+        if selected:
+            cues[category] = {label for _, _, label in selected}
+    return cues
+
+
+def _has_clear_composition_change(first_prompt, second_prompt):
+    """Return true when both prompts specify incompatible camera choices."""
+    first = _visual_composition_cues(first_prompt)
+    second = _visual_composition_cues(second_prompt)
+    for category in ("shot_distance", "camera_angle", "viewpoint"):
+        first_cues = first.get(category, set())
+        second_cues = second.get(category, set())
+        if first_cues and second_cues and first_cues.isdisjoint(second_cues):
+            return True
+    return False
+
+
 def visual_repetition_problem(query, prior_visuals):
-    """Reject an identical or near-identical scene already used in this episode."""
+    """Reject near-duplicate prompts unless they clearly change the camera composition."""
     current_tokens = _visual_similarity_tokens(query)
     if len(current_tokens) < 7:
         return None
@@ -937,10 +1269,14 @@ def visual_repetition_problem(query, prior_visuals):
         ).ratio()
 
         if sequence_ratio >= 0.84 and jaccard >= 0.76:
+            if _has_clear_composition_change(previous, query):
+                continue
             return (
-                f"This scene substantially repeats the scene already approved for segment {index + 1}. "
-                "Create a genuinely different shot showing the assigned segment's own action or story beat. "
-                "Keep character appearance consistent, but do not reuse the same action, composition, and scene."
+                f"This prompt substantially repeats the camera composition already used in segment {index + 1}. "
+                "Keep the assigned story moment and any continuous action faithful, but create a clearly different "
+                "shot through a different useful angle, shot distance, viewpoint, or focal subject. A lighting or "
+                "wording change alone is not enough. Keep recurring character appearance consistent and do not "
+                "invent a new event or action."
             )
 
     return None
@@ -1526,6 +1862,19 @@ class ContentGenerator(
                "actions or scenes:\n" + prior_visual_context
                if prior_visual_context else "")
             + "\n\n"
+            "ADJACENT-SHOT VARIETY - IMPORTANT\n"
+            "The immediately preceding clip is a no-repeat camera reference. "
+            "Do not use the same camera angle, shot distance, viewpoint, focal "
+            "subject arrangement, or overall composition in two consecutive clips. "
+            "Every adjacent clip should look like a distinctly composed shot. "
+            "When the narration continues the same conversation or uninterrupted "
+            "event, keep the same people, place, time, and supported action, but "
+            "change the camera perspective or framing - for example, a useful "
+            "wide-to-close change, reverse or over-the-shoulder view, side view, "
+            "or a different speaker/listener as the focal subject. Choose only a "
+            "view that naturally fits the moment. Do not invent a new action, "
+            "reaction, prop, or event just to create variety. Changing only lighting, "
+            "adjectives, or minor background details does not create a new shot.\n\n"
             "Create one clear, self-contained visual scene that illustrates "
             "at least one important moment from the ASSIGNED NARRATION SEGMENT. "
             "This segment is a word-count chunk and may contain more than one "
@@ -1583,6 +1932,9 @@ class ContentGenerator(
             "architecture, roads, vehicles, or technology. Never describe "
             "Jesus's physical appearance; identify him by name, actions, "
             "and place in the scene.\n\n"
+            "Use typographic punctuation in the visual prompt: ’ for apostrophes, "
+            "“…” for double quotations, and ‘…’ for single or nested quotations. "
+            "Avoid straight ASCII apostrophes and quotation marks.\n\n"
             "Write a concise prompt for one continuous short shot. Identify "
             "the main subject, action, setting, atmosphere, and suitable "
             "camera framing. Begin exactly with 'Style: realistic.' "
@@ -1956,6 +2308,13 @@ class ContentGenerator(
             "- Do consecutive clips offer meaningfully different visual "
             "information when the story provides room for it, rather than merely "
             "rewording the same pose or shot?\n"
+            "- Independently of whether the narration describes one continuous "
+            "conversation or event, adjacent clips must not repeat the same camera "
+            "composition. If the action and setting continue, the later clip should "
+            "use a clearly different useful angle, shot distance, viewpoint, or focal "
+            "subject while preserving the same supported moment. A repeated shot is "
+            "still repetitive when the story beat is continuous; do not invent a new "
+            "event to fix it.\n"
             "- Are any major segment beats missing because multiple prompts "
             "reuse a general scene that does not show the assigned event?\n\n"
             "IMPORTANT ACCEPTANCE STANDARD\n"
@@ -1969,9 +2328,11 @@ class ContentGenerator(
             "events. Do not fail the sequence merely because some actions or "
             "transitions are conveyed by narration rather than shown on screen.\n"
             "Do not require every clip to depict a different event, location, "
-            "character, or action. The same people or setting may recur when "
-            "the action or stage genuinely changes. Do not manufacture variety "
-            "by inventing actions, emotions, props, locations, or events that "
+            "character, or action. The same people, setting, and ongoing action "
+            "may recur, but consecutive clips must still use visibly different "
+            "camera compositions. A useful change of angle, framing, viewpoint, "
+            "or focal subject is enough; do not manufacture a new story event. "
+            "Do not invent actions, emotions, props, locations, or events that "
             "the passage does not support. Accept reasonable symbolic imagery "
             "for abstract or prophetic narration.\n\n"
             "TARGETED FINDINGS\n"
@@ -2009,6 +2370,7 @@ class ContentGenerator(
         scripture,
         segments,
         visuals,
+        feedback=None,
     ):
         """Build a focused comparison of every adjacent pair of visual prompts."""
         pairs = []
@@ -2038,7 +2400,17 @@ class ContentGenerator(
             "Your only task is to compare each adjacent pair of proposed visual prompts. "
             "The previous episode-wide reviewer may have missed near-duplicate shots, so "
             "inspect the actual scene descriptions side by side rather than relying on its verdict.\n\n"
-            "SCRIPTURE REFERENCE\n"
+            + (
+                "YOUR PREVIOUS AUDIT RESPONSE WAS INCOMPLETE OR INVALID\n"
+                "Correct the following response-format problem and return a COMPLETE new audit. "
+                "Reassess EVERY adjacent pair, not just the one mentioned. Include every required "
+                "description and boolean field for every pair, preserve the exact sequential pair "
+                "indices, and return valid JSON matching the schema. Do not omit fields or pairs.\n"
+                + str(feedback).strip()
+                + "\n\n"
+                if feedback else ""
+            )
+            + "SCRIPTURE REFERENCE\n"
             + scripture["reference"]
             + " ("
             + scripture["translation"]
@@ -2052,29 +2424,45 @@ class ContentGenerator(
             "one continuous sentence, quotation, or action; do not call that a problem by itself.\n"
             "2. What is the main action and composition actually described in the LEFT visual?\n"
             "3. What is the main action and composition actually described in the RIGHT visual?\n"
-            "4. Are the primary physical action and composition substantially the same? "
-            "Compare the actor's pose/action, focal subject, camera framing, and scene setup. "
-            "Changing adjectives, lighting words, or small background details does not make "
-            "a duplicate shot meaningfully different.\n"
-            "5. Does the later prompt add a meaningful visual difference or show the next "
-            "stage of the story? A different action, actual change of stage/location, "
-            "different focal event, or substantially different useful composition can count.\n\n"
+            "4. Reduce each prompt to the image a viewer would see as a still frame: "
+            "main subject(s), their visible pose/action, shot distance, camera viewpoint, "
+            "and arrangement of foreground and background. Compare those visual features "
+            "directly, not just the wording.\n"
+            "5. Decide whether both prompts use the same PRIMARY VISUAL TEMPLATE: the same "
+            "kind of main subject in essentially the same pose/action, framed and arranged "
+            "in essentially the same way. A different named location, room, wall, landscape, "
+            "time of day, lighting, weather, adjectives, or a few secondary people does NOT "
+            "make the shot different when the central image remains the same.\n"
+            "6. Does the later prompt make a genuinely visible change in camera composition "
+            "or focal subject? Count a different shot size, angle, viewpoint, or clear change "
+            "in subject placement/focus. Do not count a location/background substitution "
+            "alone.\n\n"
             "MATERIAL REPETITION STANDARD\n"
-            "Mark materially_repetitive=true only when the two narration beats are distinct "
-            "and the visuals substantially reuse the same primary action AND composition "
-            "without adding meaningful story information. Also mark it true when the later "
-            "visual clearly substitutes the earlier shot for a different concrete action "
-            "that its narration segment describes. Do NOT flag a continuous speech/dream/event "
-            "merely because it spans adjacent word chunks, provided the same scene remains "
-            "a faithful depiction of that continuous beat. Repeated characters, locations, "
-            "clothing, or general atmosphere alone are not repetition. Do not demand every "
-            "pair be visually different.\n\n"
-            "Be practical: one or two less varied clips can be tolerated when they remain "
-            "relevant. Flag clear duplicate shots or a repeated pose that replaces a new "
-            "story action; do not flag a minor imperfection or a reasonable artistic choice. "
-            "Do not invent a different event simply to create variety. When the later pair "
-            "member needs replacement, normally target the RIGHT segment only and propose "
-            "a concrete alternative supported by its narration and the source.\n\n"
+            "Adjacent clips must not look like the same shot played twice. Mark "
+            "materially_repetitive=true when the central visual template is essentially "
+            "the same and there is no genuinely different camera composition or focal "
+            "subject - EVEN IF the narration moves to a different detail, names a different "
+            "nearby place, or both chunks belong to one continuous event. A word-count "
+            "boundary may split one uninterrupted moment, but that is a reason to preserve "
+            "the same event, not to replay the same image. In that case, the later shot "
+            "should change to a clearly different useful angle, shot distance, viewpoint, "
+            "or focal subject while showing the same supported moment.\n"
+            "IMPORTANT: A setting or background change alone is NOT a new composition. "
+            "For example, moving the same centrally framed person with the same pose from "
+            "one stone street to another, or from one similar room to another, still reads "
+            "as the same shot if the subject, pose, framing, and layout stay the same.\n"
+            "Do NOT require a different action, location, character, or time just to "
+            "create variety. Repeated characters, locations, clothing, or atmosphere "
+            "alone are not repetition; the issue is a back-to-back duplicate composition "
+            "with essentially the same visible action and focal arrangement. Changing "
+            "only adjectives, lighting, or minor background details is not enough.\n\n"
+            "Be practical: accept reasonable artistic variation and do not flag shots "
+            "that are genuinely different in framing or viewpoint. Do flag a clear "
+            "back-to-back replay of essentially the same shot, even during continuous "
+            "dialogue. When the later pair member needs replacement, normally target "
+            "the RIGHT segment only. Ask for a different camera composition while "
+            "preserving the same characters, place, chronology, and narrated action; "
+            "do not invent an event.\n\n"
             "RETURN EXACTLY ONE JSON OBJECT containing pair_reviews, with EXACTLY one entry "
             "for every adjacent pair, in order. For pair N and N+1 include: left_segment_index "
             "(N), right_segment_index (N+1), left_visual_action (a short description of the "
@@ -2083,13 +2471,18 @@ class ContentGenerator(
             "subject/pose), right_visual_composition (the right prompt's main framing/focal "
             "subject/pose), narrated_beats_are_distinct (boolean), "
             "same_primary_action (boolean), same_primary_composition (boolean), "
+            "same_primary_visual_template (boolean: same central subject/pose/layout even "
+            "if location/background wording differs), camera_composition_changes (boolean: "
+            "a genuinely visible change of shot size, angle, viewpoint, or focal arrangement), "
+            "differences_only_setting_or_background (boolean), "
             "adds_meaningful_difference (boolean), materially_repetitive (boolean), "
             "issue (string), and suggested_focus (string). If not materially repetitive, "
             "issue and suggested_focus should be empty. Never omit a pair. "
-            "When adjacent segments describe the same contextual state (for "
-            "example, a family continuing to live in the same place), suitable "
-            "depictions of that state may remain similar across clips; do not force "
-            "a new action or invent a time-passing device merely to create variety.\n"
+            "When adjacent segments describe the same contextual state, the same "
+            "state may continue across clips, but the camera composition must still "
+            "change so the viewer does not see the same shot twice. Use a natural "
+            "change of framing or viewpoint, not an invented action or time-passing "
+            "device.\n"
         )
 
     def verify_visual_pairs(
@@ -2098,7 +2491,7 @@ class ContentGenerator(
         segments,
         visuals,
     ):
-        """Independently audit every adjacent pair for substantial visual repetition."""
+        """Independently audit every adjacent pair, retrying incomplete reviewer replies."""
         expected_pairs = max(0, len(segments) - 1)
         if expected_pairs == 0:
             return []
@@ -2107,172 +2500,230 @@ class ContentGenerator(
                 "Visual pair review requires exactly one visual per narration segment."
             )
 
-        prompt = self.build_visual_pairwise_review_prompt(
-            scripture,
-            segments,
-            visuals,
-        )
-        try:
-            response = self.llm.generate(
-                prompt,
-                response_format=VISUAL_PAIRWISE_VERIFICATION_SCHEMA,
+        review_feedback = None
+        review_round = 0
+
+        # A malformed or incomplete QA response is not an episode failure.
+        # Re-run the independent review with precise feedback until it returns
+        # a complete, structurally valid assessment. There is deliberately no
+        # attempt cap for this quality/reviewer-format retry.
+        while True:
+            prompt = self.build_visual_pairwise_review_prompt(
+                scripture,
+                segments,
+                visuals,
+                feedback=review_feedback,
             )
-        except Exception as error:
-            raise ContentGenerationError(
-                f"Adjacent visual-pair review could not run: {error}"
-            ) from error
-
-        try:
-            verdict = self.parse_direction(response)
-        except ContentGenerationError as error:
-            raise ContentGenerationError(
-                "Adjacent visual-pair review returned no parseable verdict."
-            ) from error
-
-        if not isinstance(verdict, dict) or not isinstance(verdict.get("pair_reviews"), list):
-            raise ContentGenerationError(
-                "Adjacent visual-pair review did not return pair_reviews."
-            )
-
-        raw_pairs = verdict["pair_reviews"]
-        if len(raw_pairs) != expected_pairs:
-            raise ContentGenerationError(
-                "Adjacent visual-pair review must assess every neighboring pair exactly once."
-            )
-
-        findings_by_segment = {}
-        seen_pairs = set()
-
-        def _normalize_review_description(value):
-            return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
-
-        for item in raw_pairs:
-            if not isinstance(item, dict):
+            try:
+                response = self.llm.generate(
+                    prompt,
+                    response_format=VISUAL_PAIRWISE_VERIFICATION_SCHEMA,
+                )
+            except Exception as error:
+                # A genuine provider/runtime failure is different from an
+                # incomplete QA answer; let the existing job-level handler
+                # report infrastructure failures accurately.
                 raise ContentGenerationError(
-                    "Adjacent visual-pair review returned a malformed pair assessment."
-                )
+                    f"Adjacent visual-pair review could not run: {error}"
+                ) from error
 
-            left_index = item.get("left_segment_index")
-            right_index = item.get("right_segment_index")
-            if (
-                isinstance(left_index, bool)
-                or isinstance(right_index, bool)
-                or not isinstance(left_index, int)
-                or not isinstance(right_index, int)
-                or right_index != left_index + 1
-                or left_index < 1
-                or right_index > len(segments)
-                or (left_index, right_index) in seen_pairs
-            ):
-                raise ContentGenerationError(
-                    "Adjacent visual-pair review returned invalid or duplicate segment indices."
-                )
-            seen_pairs.add((left_index, right_index))
-
-            description_fields = (
-                "left_visual_action",
-                "right_visual_action",
-                "left_visual_composition",
-                "right_visual_composition",
-            )
-            if any(
-                not isinstance(item.get(field), str) or not item[field].strip()
-                for field in description_fields
-            ):
-                raise ContentGenerationError(
-                    f"Adjacent visual-pair review omitted a non-empty action or composition description for pair {left_index}-{right_index}."
-                )
-
-            boolean_fields = (
-                "narrated_beats_are_distinct",
-                "same_primary_action",
-                "same_primary_composition",
-                "adds_meaningful_difference",
-                "materially_repetitive",
-            )
-            if any(not isinstance(item.get(field), bool) for field in boolean_fields):
-                raise ContentGenerationError(
-                    f"Adjacent visual-pair review omitted a required boolean for pair {left_index}-{right_index}."
-                )
-
-            same_action_and_composition_without_delta = (
-                item["narrated_beats_are_distinct"]
-                and item["same_primary_action"]
-                and item["same_primary_composition"]
-                and not item["adds_meaningful_difference"]
-            )
-            identical_action_description = (
-                _normalize_review_description(item["left_visual_action"])
-                and _normalize_review_description(item["left_visual_action"])
-                == _normalize_review_description(item["right_visual_action"])
-            )
-            identical_composition_description = (
-                _normalize_review_description(item["left_visual_composition"])
-                and _normalize_review_description(item["left_visual_composition"])
-                == _normalize_review_description(item["right_visual_composition"])
-            )
-            repeated_descriptions_without_delta = (
-                item["narrated_beats_are_distinct"]
-                and identical_action_description
-                and identical_composition_description
-                and not item["adds_meaningful_difference"]
-            )
-            # Repetition is meaningful only when the narration moves to a
-            # distinct beat. Do not reject similar imagery for adjacent chunks
-            # that describe the same continuous action or contextual state,
-            # even if the model's raw materially_repetitive flag conflicts.
-            materially_repetitive = (
-                item["narrated_beats_are_distinct"]
-                and (
-                    item["materially_repetitive"]
-                    or same_action_and_composition_without_delta
-                    or repeated_descriptions_without_delta
-                )
-            )
-
-            self.log(
-                f"Visual pair {left_index}-{right_index} audit: "
-                f"left action='{item['left_visual_action']}', "
-                f"right action='{item['right_visual_action']}', "
-                f"left composition='{item['left_visual_composition']}', "
-                f"right composition='{item['right_visual_composition']}', "
-                f"distinct beats={item['narrated_beats_are_distinct']}, "
-                f"same action={item['same_primary_action']}, "
-                f"same composition={item['same_primary_composition']}, "
-                f"meaningful difference={item['adds_meaningful_difference']}, "
-                f"material repetition={materially_repetitive}."
-            )
-
-            if materially_repetitive:
-                issue = str(item.get("issue") or "").strip()
-                if not issue:
-                    issue = (
-                        f"Segment {right_index} substantially repeats the visual action and "
-                        f"composition of segment {left_index}, although the narration moves "
-                        "to a distinct story beat. Show the later segment's own event or stage."
+            try:
+                verdict = self.parse_direction(response)
+                if not isinstance(verdict, dict) or not isinstance(verdict.get("pair_reviews"), list):
+                    raise ContentGenerationError(
+                        "Adjacent visual-pair review did not return pair_reviews."
                     )
-                focus = str(item.get("suggested_focus") or "").strip()
-                if not focus:
-                    focus = (
-                        f"Depict the specific action or stage narrated in segment {right_index}, "
-                        f"visibly distinct from segment {left_index}, without inventing details."
+
+                raw_pairs = verdict["pair_reviews"]
+                if len(raw_pairs) != expected_pairs:
+                    raise ContentGenerationError(
+                        "Adjacent visual-pair review must assess every neighboring pair exactly once."
                     )
-                findings_by_segment[right_index] = {
-                    "segment_index": right_index,
-                    "issue": issue,
-                    "suggested_focus": focus,
+
+                findings_by_segment = {}
+                seen_pairs = set()
+
+                def _normalize_review_description(value):
+                    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+                for item in raw_pairs:
+                    if not isinstance(item, dict):
+                        raise ContentGenerationError(
+                            "Adjacent visual-pair review returned a malformed pair assessment."
+                        )
+
+                    left_index = item.get("left_segment_index")
+                    right_index = item.get("right_segment_index")
+                    if (
+                        isinstance(left_index, bool)
+                        or isinstance(right_index, bool)
+                        or not isinstance(left_index, int)
+                        or not isinstance(right_index, int)
+                        or right_index != left_index + 1
+                        or left_index < 1
+                        or right_index > len(segments)
+                        or (left_index, right_index) in seen_pairs
+                    ):
+                        raise ContentGenerationError(
+                            "Adjacent visual-pair review returned invalid or duplicate segment indices."
+                        )
+                    seen_pairs.add((left_index, right_index))
+
+                    description_fields = (
+                        "left_visual_action",
+                        "right_visual_action",
+                        "left_visual_composition",
+                        "right_visual_composition",
+                    )
+                    if any(
+                        not isinstance(item.get(field), str) or not item[field].strip()
+                        for field in description_fields
+                    ):
+                        raise ContentGenerationError(
+                            f"Adjacent visual-pair review omitted a non-empty action or composition description for pair {left_index}-{right_index}."
+                        )
+
+                    boolean_fields = (
+                        "narrated_beats_are_distinct",
+                        "same_primary_action",
+                        "same_primary_composition",
+                        "same_primary_visual_template",
+                        "camera_composition_changes",
+                        "differences_only_setting_or_background",
+                        "adds_meaningful_difference",
+                        "materially_repetitive",
+                    )
+                    if any(not isinstance(item.get(field), bool) for field in boolean_fields):
+                        raise ContentGenerationError(
+                            f"Adjacent visual-pair review omitted a required boolean for pair {left_index}-{right_index}."
+                        )
+
+                    left_prompt = str(
+                        (visuals[left_index - 1] or {}).get("search_query", "")
+                        if isinstance(visuals[left_index - 1], dict)
+                        else visuals[left_index - 1] or ""
+                    )
+                    right_prompt = str(
+                        (visuals[right_index - 1] or {}).get("search_query", "")
+                        if isinstance(visuals[right_index - 1], dict)
+                        else visuals[right_index - 1] or ""
+                    )
+                    explicit_composition_change = _has_clear_composition_change(
+                        left_prompt,
+                        right_prompt,
+                    )
+                    camera_composition_changes = (
+                        item["camera_composition_changes"]
+                        or explicit_composition_change
+                    )
+                    same_action_and_composition_without_delta = (
+                        item["same_primary_action"]
+                        and item["same_primary_composition"]
+                        and not item["adds_meaningful_difference"]
+                        and not camera_composition_changes
+                    )
+                    identical_action_description = (
+                        _normalize_review_description(item["left_visual_action"])
+                        and _normalize_review_description(item["left_visual_action"])
+                        == _normalize_review_description(item["right_visual_action"])
+                    )
+                    identical_composition_description = (
+                        _normalize_review_description(item["left_visual_composition"])
+                        and _normalize_review_description(item["left_visual_composition"])
+                        == _normalize_review_description(item["right_visual_composition"])
+                    )
+                    repeated_descriptions_without_delta = (
+                        identical_action_description
+                        and identical_composition_description
+                        and not item["adds_meaningful_difference"]
+                        and not camera_composition_changes
+                    )
+                    # A continuous narration beat does not excuse replaying the same
+                    # camera shot. If action and composition are unchanged, the later
+                    # clip must switch angle/framing/focal view while preserving the
+                    # same event. The model's distinct-beat flag is diagnostic only.
+                    same_visual_template_without_reframe = (
+                        item["same_primary_visual_template"]
+                        and not camera_composition_changes
+                    )
+                    setting_only_repeats_same_template = (
+                        item["differences_only_setting_or_background"]
+                        and item["same_primary_visual_template"]
+                        and not camera_composition_changes
+                    )
+                    materially_repetitive = (
+                        same_visual_template_without_reframe
+                        or setting_only_repeats_same_template
+                        or same_action_and_composition_without_delta
+                        or repeated_descriptions_without_delta
+                        or (
+                            item["materially_repetitive"]
+                            and item["same_primary_action"]
+                            and item["same_primary_composition"]
+                            and not item["adds_meaningful_difference"]
+                            and not camera_composition_changes
+                        )
+                    )
+
+                    self.log(
+                        f"Visual pair {left_index}-{right_index} audit: "
+                        f"left action='{item['left_visual_action']}', "
+                        f"right action='{item['right_visual_action']}', "
+                        f"left composition='{item['left_visual_composition']}', "
+                        f"right composition='{item['right_visual_composition']}', "
+                        f"distinct beats={item['narrated_beats_are_distinct']}, "
+                        f"same action={item['same_primary_action']}, "
+                        f"same composition={item['same_primary_composition']}, "
+                        f"same visual template={item['same_primary_visual_template']}, "
+                        f"camera composition changes={item['camera_composition_changes']}, "
+                        f"setting/background only={item['differences_only_setting_or_background']}, "
+                        f"explicit camera change={explicit_composition_change}, "
+                        f"meaningful difference={item['adds_meaningful_difference']}, "
+                        f"material repetition={materially_repetitive}."
+                    )
+
+                    if materially_repetitive:
+                        issue = str(item.get("issue") or "").strip()
+                        if not issue:
+                            issue = (
+                                f"Segment {right_index} repeats essentially the same shot as segment "
+                                f"{left_index}. Even if the narration continues the same moment, "
+                                "the later clip needs a clearly different camera composition."
+                            )
+                        focus = str(item.get("suggested_focus") or "").strip()
+                        if not focus:
+                            focus = (
+                                f"Keep the same supported story moment in segment {right_index}, but "
+                                "change the camera angle, shot distance, viewpoint, or focal subject "
+                                "clearly from the preceding clip. Do not invent a new action or event."
+                            )
+                        findings_by_segment[right_index] = {
+                            "segment_index": right_index,
+                            "issue": issue,
+                            "suggested_focus": focus,
+                        }
+
+                expected_set = {
+                    (index, index + 1)
+                    for index in range(1, len(segments))
                 }
+                if seen_pairs != expected_set:
+                    raise ContentGenerationError(
+                        "Adjacent visual-pair review did not cover every neighboring pair exactly once."
+                    )
 
-        expected_set = {
-            (index, index + 1)
-            for index in range(1, len(segments))
-        }
-        if seen_pairs != expected_set:
-            raise ContentGenerationError(
-                "Adjacent visual-pair review did not cover every neighboring pair exactly once."
-            )
+                return [findings_by_segment[index] for index in sorted(findings_by_segment)]
 
-        return [findings_by_segment[index] for index in sorted(findings_by_segment)]
+            except ContentGenerationError as error:
+                review_round += 1
+                review_feedback = str(error)
+                self.log(
+                    f"Adjacent visual-pair review response was incomplete or invalid "
+                    f"on round {review_round} ({review_feedback}); requesting a complete "
+                    "replacement audit without failing the episode..."
+                )
+                continue
+
 
     def verify_visual_sequence(
         self,
@@ -2604,6 +3055,10 @@ class ContentGenerator(
             "the title.\n"
             "- Do NOT interpret, and do not add any claim the passage does "
             "not state. Report the content; do not explain its theology.\n"
+            "- Use typographic punctuation in the title and summary: ’ for "
+            "apostrophes, “…” for double quotations, and ‘…’ for single or "
+            "nested quotations. Do not use straight ASCII apostrophes or "
+            "quotation marks.\n"
             "- Include enough context to make the central story understandable, "
             "but leave secondary details, repeated actions, and step-by-step "
             "transitions to the narration. Do not reproduce the narration in "
@@ -2955,7 +3410,9 @@ class ContentGenerator(
             "it. Leave secondary details and chronological beats to the narration. "
             "There is no fixed word, character, or sentence-count limit. Ensure it is coherent "
             "and that its final sentence ends cleanly rather than stopping "
-            "mid-clause. Return only the "
+            "mid-clause. Use typographic punctuation: ’ for apostrophes, “…” for "
+            "double quotations, and ‘…’ for single or nested quotations; do not "
+            "use straight ASCII apostrophes or quotation marks. Return only the "
             "requested field(s) as one JSON object.\n"
         )
 
@@ -2995,13 +3452,17 @@ class ContentGenerator(
             raise ContentGenerationError("Metadata generation returned no usable object.")
 
         reference = scripture["reference"]
-        title = _strip_reference(
-            str(metadata.get("title") or "").strip(),
-            reference,
+        title = normalize_typographic_punctuation(
+            _strip_reference(
+                str(metadata.get("title") or "").strip(),
+                reference,
+            )
         )
-        summary = _strip_reference(
-            str(metadata.get("summary") or "").strip(),
-            reference,
+        summary = normalize_typographic_punctuation(
+            _strip_reference(
+                str(metadata.get("summary") or "").strip(),
+                reference,
+            )
         )
         mood = metadata.get("mood", "")
 
@@ -3074,9 +3535,11 @@ class ContentGenerator(
                 )
 
             for field in failed_fields:
-                replacement = _strip_reference(
-                    str(repaired.get(field) or "").strip(),
-                    reference,
+                replacement = normalize_typographic_punctuation(
+                    _strip_reference(
+                        str(repaired.get(field) or "").strip(),
+                        reference,
+                    )
                 )
                 if replacement:
                     if field == "title":
@@ -3154,9 +3617,10 @@ class ContentGenerator(
         passage is kept alongside it as source_text, the authority the
         telling was measured against.
         """
-        spoken = str(
-            narration or ""
-        ).strip()
+        spoken = normalize_typographic_punctuation(
+            str(narration or "").strip()
+        )
+        spoken = repair_quote_spacing_and_terminal_punctuation(spoken)
 
         if not spoken:
 
@@ -3192,7 +3656,9 @@ class ContentGenerator(
             if not isinstance(entry, dict):
                 entry = {}
 
-            query = str(entry.get("search_query", "")).strip()
+            query = normalize_typographic_punctuation(
+                str(entry.get("search_query", "")).strip()
+            )
             if not query:
                 # The fallback still has to belong to this moment of the
                 # story: the narration on either side of the segment is
@@ -3211,7 +3677,7 @@ class ContentGenerator(
 
             visuals.append({
                 "search_query": query,
-                "sentence": segment,
+                "sentence": normalize_typographic_punctuation(segment),
             })
 
         title = str(
@@ -3246,9 +3712,11 @@ class ContentGenerator(
         # em dash, and the reference uses an en dash (–) between the
         # verse ranges. A title carries no full stop, because the
         # reference supplies the ending.
-        title = "{} — {}".format(
-            reference,
-            title.rstrip(" ."),
+        title = normalize_typographic_punctuation(
+            "{} — {}".format(
+                reference,
+                title.rstrip(" ."),
+            )
         )
 
         summary = str(
@@ -3260,9 +3728,11 @@ class ContentGenerator(
 
         # The reference already appears in the title, so a summary that
         # repeats it is redundant. Strip any that leaked in.
-        summary = _strip_reference(
-            summary,
-            reference,
+        summary = normalize_typographic_punctuation(
+            _strip_reference(
+                summary,
+                reference,
+            )
         )
 
         if (
@@ -3463,6 +3933,11 @@ class ContentGenerator(
             + "Scripture per episode as original, engaging storytelling "
             + "through original narration and selected "
             + "verbatim WEBC quotations.\n\n"
+            "TYPOGRAPHIC PUNCTUATION\n"
+            "Use typographic punctuation throughout the narration: ’ for apostrophes, "
+            "“…” for double quotations, and ‘…’ for single or nested quotations. "
+            "Never use straight ASCII apostrophes or quotation marks. Preserve the "
+            "source's double-versus-single quotation levels.\n\n"
             "YOUR TASK, IN TWO PHASES\n"
             "Phase 1 - UNDERSTAND. Read the whole passage first and take "
             "in its events, its meaning, its context, and how its parts "
@@ -3680,8 +4155,10 @@ class ContentGenerator(
             "to Jesus's words: never approve a paraphrase, modernization, or "
             "shortened fragment presented as His direct words.\n"
             "- Punctuation: are quotation marks balanced and correctly nested? "
-            "Accept any consistent straight or curly quote style; do not "
-            "reject solely for single-versus-double style.\n"
+            "Preserve the source's double-versus-single quotation levels. Use "
+            "curly double marks “…” for source double quotes and curly single "
+            "marks ‘…’ for source single quotes, including nested speech. Do not "
+            "switch quotation levels or use straight ASCII quotation marks.\n"
             "- Names and references: does the narration use the "
             "passage's own names and titles, and never speak a "
             "chapter, verse, or reference? An invented title is a "
@@ -4134,9 +4611,15 @@ class ContentGenerator(
                 scripture.get("text", ""),
                 narration,
             )
+            narration = normalize_typographic_punctuation(narration)
+            narration = repair_quote_spacing_and_terminal_punctuation(narration)
 
             deterministic_issues = (
                 narration_quote_problems(
+                    scripture.get("text", ""),
+                    narration,
+                )
+                + narration_quote_style_problems(
                     scripture.get("text", ""),
                     narration,
                 )
@@ -4150,6 +4633,8 @@ class ContentGenerator(
                     lowered = issue.lower()
                     if "only part of a sentence" in lowered or "complete source sentence" in lowered:
                         category = "Quotation completeness"
+                    elif "quotation formatting" in lowered or "curly" in lowered:
+                        category = "Quotation typography"
                     elif "direct quotation" in lowered or "quoted" in lowered:
                         category = "Quotation exactness"
                     elif "speaker" in lowered or "attribution" in lowered:
@@ -4265,7 +4750,14 @@ class ContentGenerator(
             if not isinstance(parsed, dict):
                 parsed = {}
 
-            query = str(parsed.get("search_query") or "").strip()
+            query = normalize_typographic_punctuation(
+                str(parsed.get("search_query") or "").strip()
+            )
+            if isinstance(parsed.get("visual_direction"), str):
+                parsed["visual_direction"] = normalize_typographic_punctuation(
+                    parsed["visual_direction"]
+                )
+            parsed["search_query"] = query
             if not query:
                 reason = (
                     "The visual prompt was empty. Return a complete, specific "
@@ -4355,10 +4847,11 @@ class ContentGenerator(
             "Make it meaningfully different from the other clips while remaining "
             "faithful to this segment and the source passage. Do not change the "
             "other segments. If the narration describes the same continuous "
-            "event as a neighboring clip, use a genuinely different useful "
-            "framing, perspective, focal detail, or stage of that same supported "
-            "event rather than inventing a new action. If no distinct alternative "
-            "is possible, prioritize a faithful, coherent visual over forced variety."
+            "event as a neighboring clip, keep that same event and action but use "
+            "a clearly different camera angle, shot distance, viewpoint, or focal "
+            "subject. Do not rely on lighting or adjective changes, and do not "
+            "invent a new action. Prefer a natural alternate composition over "
+            "repeating the preceding shot."
         )
         return prompt
 
@@ -5160,6 +5653,10 @@ def write_content_files(
     Saves the episode content. `content.json` is the source of truth
     for the video stage; `prompt.txt` is kept for reference.
     """
+    # Enforce generated display typography at the persistence boundary too.
+    # source_text is deliberately excluded and remains byte-for-byte unchanged.
+    content = normalize_generated_content_fields(content)
+
     episode_directory = Path(episode_directory)
     episode_directory.mkdir(
         parents=True,
